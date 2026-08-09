@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -154,4 +155,29 @@ func TestDo_MapsRateLimitOn429(t *testing.T) {
 	err := c.do(context.Background(), http.MethodGet, "/api/v3/account/assets", nil, nil, nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrRateLimited))
+}
+
+func TestDo_ReturnsErrorForUnexpectedHTTPStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"code":"00000","msg":"success","requestTime":1,"data":{}}`))
+	}))
+	defer server.Close()
+
+	c := NewClient("", "", "", WithBaseURL(server.URL))
+	err := c.doPublic(context.Background(), http.MethodGet, "/api/v3/market/tickers", nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unexpected HTTP status 500")
+}
+
+func TestDo_RejectsOversizedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", maxResponseBodySize+1)))
+	}))
+	defer server.Close()
+
+	c := NewClient("", "", "", WithBaseURL(server.URL))
+	err := c.doPublic(context.Background(), http.MethodGet, "/api/v3/market/tickers", nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "response body exceeds")
 }

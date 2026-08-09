@@ -21,6 +21,8 @@ import (
 	"time"
 )
 
+const maxResponseBodySize = 10 << 20
+
 // Client is the low-level authenticated HTTP transport shared by every
 // service under RestClient. Most callers should construct a *RestClient via
 // NewRestClient instead of using Client directly.
@@ -167,9 +169,12 @@ func (c *Client) request(ctx context.Context, method, path string, query map[str
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize+1))
 	if err != nil {
 		return fmt.Errorf("bitget: read response body: %w", err)
+	}
+	if len(respBody) > maxResponseBodySize {
+		return fmt.Errorf("bitget: response body exceeds %d bytes", maxResponseBodySize)
 	}
 
 	if resp.StatusCode == http.StatusTooManyRequests {
@@ -177,8 +182,14 @@ func (c *Client) request(ctx context.Context, method, path string, query map[str
 	}
 
 	var env envelope
-	if err := json.Unmarshal(respBody, &env); err != nil {
-		return fmt.Errorf("bitget: decode response envelope (status %d): %w", resp.StatusCode, err)
+	decodeErr := json.Unmarshal(respBody, &env)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if decodeErr != nil || env.Code == "" || env.Code == "00000" {
+			return fmt.Errorf("bitget: unexpected HTTP status %s", resp.Status)
+		}
+	}
+	if decodeErr != nil {
+		return fmt.Errorf("bitget: decode response envelope (status %d): %w", resp.StatusCode, decodeErr)
 	}
 
 	if env.Code != "" && env.Code != "00000" {

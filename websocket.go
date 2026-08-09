@@ -27,13 +27,14 @@ const (
 )
 
 const (
-	wsPingInterval  = 25 * time.Second
-	wsPongTimeout   = 30 * time.Second
-	wsWriteTimeout  = 10 * time.Second
-	wsLoginTimeout  = 10 * time.Second
-	wsReconnectMin  = 1 * time.Second
-	wsReconnectMax  = 60 * time.Second
-	wsSubBufferSize = 100
+	wsPingInterval   = 25 * time.Second
+	wsPongTimeout    = 30 * time.Second
+	wsWriteTimeout   = 10 * time.Second
+	wsLoginTimeout   = 10 * time.Second
+	wsReconnectMin   = 1 * time.Second
+	wsReconnectMax   = 60 * time.Second
+	wsSubBufferSize  = 100
+	wsMaxMessageSize = 10 << 20
 )
 
 // WSOption configures a WSClient at construction time.
@@ -59,8 +60,10 @@ func WithWSAutoReconnect(enabled bool) WSOption {
 // wsSubscription tracks one active channel subscription: the args used to
 // (re)subscribe, and the channel data pushes are delivered on.
 type wsSubscription struct {
-	arg models.WSArg
-	ch  chan models.WSPush
+	mu     sync.RWMutex
+	arg    models.WSArg
+	ch     chan models.WSPush
+	closed bool
 }
 
 // WSClient is a reconnecting WebSocket client for Bitget's public or
@@ -79,11 +82,15 @@ type WSClient struct {
 	autoReconnect bool
 
 	mu            sync.RWMutex
+	writeMu       sync.Mutex
 	conn          *websocket.Conn
 	subscriptions map[string]*wsSubscription
 	closed        bool
+	active        bool
+	reconnecting  bool
 	done          chan struct{}
-	loggedIn      chan struct{}
+	loginWait     chan error
+	lastPong      time.Time
 }
 
 // NewPublicWSClient creates a client for Bitget's public market-data
@@ -94,6 +101,7 @@ func NewPublicWSClient(opts ...WSOption) *WSClient {
 		logger:        noopLogger{},
 		autoReconnect: true,
 		subscriptions: make(map[string]*wsSubscription),
+		done:          make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -114,6 +122,7 @@ func NewPrivateWSClient(apiKey, secretKey, passphrase string, opts ...WSOption) 
 		logger:        noopLogger{},
 		autoReconnect: true,
 		subscriptions: make(map[string]*wsSubscription),
+		done:          make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -141,22 +150,44 @@ func wsLoginSign(secretKey, timestamp string) string {
 // initial connection (and, for private clients, login) succeeds or ctx is
 // done.
 func (c *WSClient) Connect(ctx context.Context) error {
-	c.mu.Lock()
-	c.closed = false
-	c.done = make(chan struct{})
-	c.mu.Unlock()
+	c.mu.RLock()
+	closed := c.closed
+	connected := c.conn != nil
+	c.mu.RUnlock()
+	if closed {
+		return fmt.Errorf("bitget: websocket client is closed")
+	}
+	if connected {
+		return fmt.Errorf("bitget: websocket already connected")
+	}
+	return c.establish(ctx, true)
+}
 
+func (c *WSClient) establish(ctx context.Context, startPing bool) error {
 	if err := c.dial(ctx); err != nil {
 		return err
 	}
 
-	go c.readPump()
-	go c.pingPump()
-
 	if c.private {
+		go c.readPump()
 		if err := c.login(ctx); err != nil {
+			c.closeCurrentConnection()
 			return err
 		}
+	}
+
+	c.mu.Lock()
+	if c.closed || c.conn == nil {
+		c.mu.Unlock()
+		return fmt.Errorf("bitget: websocket client is closed")
+	}
+	c.active = true
+	c.mu.Unlock()
+	if !c.private {
+		go c.readPump()
+	}
+	if startPing {
+		go c.pingPump()
 	}
 	return nil
 }
@@ -166,17 +197,32 @@ func (c *WSClient) dial(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("bitget: websocket dial: %w", err)
 	}
+	conn.SetReadLimit(wsMaxMessageSize)
+
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		_ = conn.Close()
+		return fmt.Errorf("bitget: websocket client is closed")
+	}
+	if c.conn != nil {
+		c.mu.Unlock()
+		_ = conn.Close()
+		return fmt.Errorf("bitget: websocket already connected")
+	}
 	c.conn = conn
+	c.lastPong = time.Now()
 	c.mu.Unlock()
 	c.logger.Info("bitget: websocket connected", "url", c.url)
 	return nil
 }
 
 func (c *WSClient) login(ctx context.Context) error {
+	loginWait := make(chan error, 1)
 	c.mu.Lock()
-	c.loggedIn = make(chan struct{})
+	c.loginWait = loginWait
 	c.mu.Unlock()
+	defer c.clearLoginWait(loginWait)
 
 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	req := models.WSLoginRequest{
@@ -192,33 +238,83 @@ func (c *WSClient) login(ctx context.Context) error {
 		return err
 	}
 
+	timer := time.NewTimer(wsLoginTimeout)
+	defer timer.Stop()
 	select {
-	case <-c.loggedIn:
+	case err := <-loginWait:
+		if err != nil {
+			return err
+		}
 		c.logger.Info("bitget: websocket login succeeded")
 		return nil
-	case <-time.After(wsLoginTimeout):
+	case <-timer.C:
 		return fmt.Errorf("bitget: websocket login timed out")
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-c.done:
+		return fmt.Errorf("bitget: websocket client is closed")
+	}
+}
+
+func (c *WSClient) clearLoginWait(loginWait chan error) {
+	c.mu.Lock()
+	if c.loginWait == loginWait {
+		c.loginWait = nil
+	}
+	c.mu.Unlock()
+}
+
+func (c *WSClient) completeLogin(err error) {
+	c.mu.RLock()
+	loginWait := c.loginWait
+	c.mu.RUnlock()
+	if loginWait == nil {
+		return
+	}
+	select {
+	case loginWait <- err:
+	default:
 	}
 }
 
 func (c *WSClient) writeJSON(v interface{}) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
 	c.mu.RLock()
 	conn := c.conn
+	closed := c.closed
 	c.mu.RUnlock()
-	if conn == nil {
+	if closed || conn == nil {
 		return fmt.Errorf("bitget: websocket not connected")
 	}
 	_ = conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 	return conn.WriteJSON(v)
 }
 
+func (c *WSClient) writeMessage(messageType int, data []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	c.mu.RLock()
+	conn := c.conn
+	closed := c.closed
+	c.mu.RUnlock()
+	if closed || conn == nil {
+		return fmt.Errorf("bitget: websocket not connected")
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+	return conn.WriteMessage(messageType, data)
+}
+
 // Subscribe subscribes to a channel and returns a buffered channel of data
 // pushes. The subscription is automatically restored after a reconnect.
 func (c *WSClient) Subscribe(ctx context.Context, arg models.WSArg) (<-chan models.WSPush, error) {
-	key := wsSubKey(arg)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
+	key := wsSubKey(arg)
 	c.mu.Lock()
 	sub, exists := c.subscriptions[key]
 	if !exists {
@@ -248,10 +344,33 @@ func (c *WSClient) Unsubscribe(arg models.WSArg) error {
 	if !exists {
 		return nil
 	}
-	close(sub.ch)
+	sub.close()
 
 	req := models.WSSubscribeRequest{Op: "unsubscribe", Args: []models.WSArg{arg}}
 	return c.writeJSON(req)
+}
+
+func (s *wsSubscription) send(push models.WSPush) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return false
+	}
+	select {
+	case s.ch <- push:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *wsSubscription) close() {
+	s.mu.Lock()
+	if !s.closed {
+		s.closed = true
+		close(s.ch)
+	}
+	s.mu.Unlock()
 }
 
 // Close terminates the connection and stops all background loops. Safe to
@@ -263,12 +382,19 @@ func (c *WSClient) Close() error {
 		return nil
 	}
 	c.closed = true
+	c.active = false
 	conn := c.conn
+	c.conn = nil
 	done := c.done
+	subscriptions := make([]*wsSubscription, 0, len(c.subscriptions))
+	for _, sub := range c.subscriptions {
+		subscriptions = append(subscriptions, sub)
+	}
 	c.mu.Unlock()
 
-	if done != nil {
-		close(done)
+	close(done)
+	for _, sub := range subscriptions {
+		sub.close()
 	}
 	if conn != nil {
 		return conn.Close()
@@ -277,47 +403,66 @@ func (c *WSClient) Close() error {
 }
 
 func (c *WSClient) pingPump() {
+	c.mu.RLock()
+	done := c.done
+	c.mu.RUnlock()
 	ticker := time.NewTicker(wsPingInterval)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-c.done:
+		case <-done:
 			return
 		case <-ticker.C:
 			c.mu.RLock()
 			conn := c.conn
+			lastPong := c.lastPong
+			closed := c.closed
 			c.mu.RUnlock()
-			if conn == nil {
+			if closed || conn == nil {
 				continue
 			}
-			_ = conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
-			if err := conn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
+			if time.Since(lastPong) > wsPongTimeout {
+				c.logger.Warn("bitget: websocket pong timed out")
+				if current, active := c.disconnect(conn); current && active {
+					c.startReconnect()
+				}
+				continue
+			}
+			if err := c.writeMessage(websocket.TextMessage, []byte("ping")); err != nil {
 				c.logger.Warn("bitget: websocket ping failed", "error", err)
+				if current, active := c.disconnect(conn); current && active {
+					c.startReconnect()
+				}
 			}
 		}
 	}
 }
 
 func (c *WSClient) readPump() {
-	for {
-		c.mu.RLock()
-		conn := c.conn
-		closed := c.closed
-		c.mu.RUnlock()
-		if closed || conn == nil {
-			return
-		}
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil {
+		return
+	}
 
+	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			c.logger.Warn("bitget: websocket read error", "error", err)
-			if c.autoReconnect && !c.isClosed() {
-				go c.reconnectLoop()
+			c.completeLogin(fmt.Errorf("bitget: websocket read: %w", err))
+			if current, active := c.disconnect(conn); current && active {
+				c.startReconnect()
 			}
 			return
 		}
 
 		if string(message) == "pong" {
+			c.mu.Lock()
+			if c.conn == conn {
+				c.lastPong = time.Now()
+			}
+			c.mu.Unlock()
 			continue
 		}
 
@@ -325,10 +470,38 @@ func (c *WSClient) readPump() {
 	}
 }
 
-func (c *WSClient) isClosed() bool {
+func (c *WSClient) disconnect(conn *websocket.Conn) (bool, bool) {
+	c.mu.Lock()
+	if c.conn != conn {
+		c.mu.Unlock()
+		return false, false
+	}
+	active := c.active
+	c.conn = nil
+	c.active = false
+	c.mu.Unlock()
+	_ = conn.Close()
+	return true, active
+}
+
+func (c *WSClient) closeCurrentConnection() {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.closed
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn != nil {
+		c.disconnect(conn)
+	}
+}
+
+func (c *WSClient) startReconnect() {
+	c.mu.Lock()
+	if c.closed || !c.autoReconnect || c.reconnecting {
+		c.mu.Unlock()
+		return
+	}
+	c.reconnecting = true
+	c.mu.Unlock()
+	go c.reconnectLoop()
 }
 
 func (c *WSClient) handleMessage(message []byte) {
@@ -336,17 +509,14 @@ func (c *WSClient) handleMessage(message []byte) {
 	if err := json.Unmarshal(message, &event); err == nil && event.Event != "" {
 		switch event.Event {
 		case "login":
-			c.mu.RLock()
-			loggedIn := c.loggedIn
-			c.mu.RUnlock()
-			if loggedIn != nil {
-				select {
-				case <-loggedIn:
-				default:
-					close(loggedIn)
-				}
+			if event.Code != "" && event.Code != "0" {
+				c.completeLogin(fmt.Errorf("bitget: websocket login failed: code=%s, message=%s", event.Code, event.Msg))
+				return
 			}
+			c.completeLogin(nil)
 		case "error":
+			loginErr := fmt.Errorf("bitget: websocket error event: code=%s, message=%s", event.Code, event.Msg)
+			c.completeLogin(loginErr)
 			c.logger.Error("bitget: websocket error event", "code", event.Code, "msg", event.Msg)
 		}
 		return
@@ -365,23 +535,33 @@ func (c *WSClient) handleMessage(message []byte) {
 	if !ok {
 		return
 	}
-	select {
-	case sub.ch <- push:
-	default:
+	if !sub.send(push) {
 		c.logger.Warn("bitget: websocket subscriber channel full, dropping message", "channel", key)
 	}
 }
 
 func (c *WSClient) reconnectLoop() {
+	c.mu.RLock()
+	done := c.done
+	c.mu.RUnlock()
+	defer func() {
+		c.mu.Lock()
+		c.reconnecting = false
+		c.mu.Unlock()
+	}()
+
 	backoff := wsReconnectMin
 	for {
-		if c.isClosed() {
+		timer := time.NewTimer(backoff)
+		select {
+		case <-done:
+			timer.Stop()
 			return
+		case <-timer.C:
 		}
-		time.Sleep(backoff)
 
 		ctx, cancel := context.WithTimeout(context.Background(), wsLoginTimeout)
-		err := c.Connect(ctx)
+		err := c.establish(ctx, false)
 		cancel()
 		if err != nil {
 			c.logger.Warn("bitget: websocket reconnect failed", "error", err, "backoff", backoff)
