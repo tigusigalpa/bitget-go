@@ -1,5 +1,7 @@
 # Bitget Go SDK
 
+![Bitget Golang SDK](https://i.postimg.cc/j2ZkYg04/bitget-golang-github.jpg)
+
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue)](go.mod)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Go Reference](https://pkg.go.dev/badge/github.com/tigusigalpa/bitget-go.svg)](https://pkg.go.dev/github.com/tigusigalpa/bitget-go)
