@@ -1,0 +1,6 @@
+/coverage.out
+/coverage.html
+*.test
+.env
+.idea/
+.vscode/
