@@ -8,7 +8,7 @@
 
 A clean, idiomatic Go SDK for the [Bitget Unified Trading Account (UTA) API v3](https://www.bitget.com/api-doc/uta/intro). Built for developers who want reliable market data, account management, and trading — without wrestling with raw HTTP signatures or silently losing precision to `float64`.
 
-> **Heads up:** This is Phase 1. We currently cover Market, Account, and Trade REST services, plus a reconnecting WebSocket client. More endpoints and channels will land as the SDK matures.
+> 📖 **[Full documentation available on Wiki](https://github.com/tigusigalpa/bitget-go/wiki)**
 
 A matching PHP/Laravel SDK lives at [tigusigalpa/bitget-php](https://github.com/tigusigalpa/bitget-php) if you also run services in that ecosystem.
 
@@ -284,6 +284,7 @@ Igor Sazonov — [@tigusigalpa](https://github.com/tigusigalpa) — sovletig@gma
 
 - [Bitget UTA API documentation](https://www.bitget.com/api-doc/uta/intro)
 - [GitHub repository](https://github.com/tigusigalpa/bitget-go)
+- [GitHub Wiki documentation](https://github.com/tigusigalpa/bitget-go/wiki)
 - [Issue tracker](https://github.com/tigusigalpa/bitget-go/issues)
 
 ---
