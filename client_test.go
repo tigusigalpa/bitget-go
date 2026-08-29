@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -181,3 +182,31 @@ func TestDo_RejectsOversizedResponse(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "response body exceeds")
 }
+
+func TestClientOptionsAndRestClient(t *testing.T) {
+	httpClient := &http.Client{}
+	logger := &recordingLogger{}
+	client := NewClient("key", "secret", "pass",
+		WithHTTPClient(httpClient),
+		WithBaseURL("https://example.test"),
+		WithTimeout(time.Second),
+		WithLogger(logger),
+		WithLocale("zh-CN"),
+	)
+	assert.Same(t, httpClient, client.httpClient)
+	assert.Equal(t, "https://example.test", client.baseURL)
+	assert.Equal(t, time.Second, client.timeout)
+	assert.Equal(t, "zh-CN", client.locale)
+
+	restClient := NewRestClient("", "", "")
+	assert.NotNil(t, restClient.Market)
+	assert.NotNil(t, restClient.Account)
+	assert.NotNil(t, restClient.Trade)
+}
+
+type recordingLogger struct{}
+
+func (*recordingLogger) Debug(string, ...any) {}
+func (*recordingLogger) Info(string, ...any)  {}
+func (*recordingLogger) Warn(string, ...any)  {}
+func (*recordingLogger) Error(string, ...any) {}
