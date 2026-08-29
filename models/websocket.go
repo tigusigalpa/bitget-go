@@ -22,7 +22,7 @@ type WSSubscribeRequest struct {
 
 // WSLoginArg is a single credential entry within a login request.
 type WSLoginArg struct {
-	ApiKey     string `json:"apiKey"`
+	APIKey     string `json:"apiKey"`
 	Passphrase string `json:"passphrase"`
 	Timestamp  string `json:"timestamp"`
 	Sign       string `json:"sign"`

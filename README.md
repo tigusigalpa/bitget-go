@@ -5,6 +5,9 @@
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue)](go.mod)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Go Reference](https://pkg.go.dev/badge/github.com/tigusigalpa/bitget-go.svg)](https://pkg.go.dev/github.com/tigusigalpa/bitget-go)
+[![Tests](https://github.com/tigusigalpa/bitget-go/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/tigusigalpa/bitget-go/actions/workflows/test.yml)
+[![Codecov](https://codecov.io/gh/tigusigalpa/bitget-go/graph/badge.svg)](https://codecov.io/gh/tigusigalpa/bitget-go)
+[![CodeQL](https://github.com/tigusigalpa/bitget-go/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/tigusigalpa/bitget-go/actions/workflows/codeql.yml)
 
 A clean, idiomatic Go SDK for the [Bitget Unified Trading Account (UTA) API v3](https://www.bitget.com/api-doc/uta/intro). Built for developers who want reliable market data, account management, and trading — without wrestling with raw HTTP signatures or silently losing precision to `float64`.
 
@@ -198,7 +201,7 @@ if err != nil {
 		return
 	}
 
-	var bitgetErr *bitget.BitgetError
+	var bitgetErr *bitget.Error
 	if errors.As(err, &bitgetErr) {
 		// Bitget returned a business-level error.
 		log.Printf("Bitget error %s: %s", bitgetErr.Code, bitgetErr.Message)

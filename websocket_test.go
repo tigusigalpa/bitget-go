@@ -56,6 +56,27 @@ func TestWithWSURL_Overrides(t *testing.T) {
 	assert.Equal(t, DemoPublicWSURL, c.url)
 }
 
+func TestNilLoggersUseNoopLogger(t *testing.T) {
+	restClient := NewClient("", "", "", WithLogger(nil))
+	wsClient := NewPublicWSClient(WithWSLogger(nil))
+
+	assert.NotPanics(t, func() {
+		restClient.logger.Debug("request")
+		wsClient.logger.Info("connected")
+		NewSlogLogger(nil).Warn("ignored")
+	})
+}
+
+func TestSubscribe_DoesNotRetainSubscriptionWhenWriteFails(t *testing.T) {
+	client := NewPublicWSClient()
+	arg := models.WSArg{InstType: "SPOT", Topic: "ticker", Symbol: "BTCUSDT"}
+
+	pushes, err := client.Subscribe(context.Background(), arg)
+	require.Error(t, err)
+	assert.Nil(t, pushes)
+	assert.Empty(t, client.subscriptions)
+}
+
 func TestPrivateWSConnect_ReturnsLoginErrorImmediately(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

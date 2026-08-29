@@ -22,6 +22,7 @@ type BitgetResponse[T any] struct {
 // Common values: SPOT, MARGIN, USDT-FUTURES, COIN-FUTURES, USDC-FUTURES.
 type Category = string
 
+// Category values identify the Bitget product type.
 const (
 	CategorySpot        Category = "SPOT"
 	CategoryMargin      Category = "MARGIN"
@@ -33,6 +34,7 @@ const (
 // Side is an order direction: "buy" or "sell".
 type Side = string
 
+// Side values identify the order direction.
 const (
 	SideBuy  Side = "buy"
 	SideSell Side = "sell"
@@ -41,6 +43,7 @@ const (
 // PosSide is a hedge-mode futures position side: "long" or "short".
 type PosSide = string
 
+// PosSide values identify the futures position side.
 const (
 	PosSideLong  PosSide = "long"
 	PosSideShort PosSide = "short"
@@ -49,6 +52,7 @@ const (
 // OrderType is an order execution type: "limit" or "market".
 type OrderType = string
 
+// OrderType values identify the order execution type.
 const (
 	OrderTypeLimit  OrderType = "limit"
 	OrderTypeMarket OrderType = "market"
@@ -57,6 +61,7 @@ const (
 // TimeInForce controls how the unfilled portion of an order is handled.
 type TimeInForce = string
 
+// TimeInForce values control handling of an unfilled order quantity.
 const (
 	TimeInForceIOC      TimeInForce = "ioc"
 	TimeInForceFOK      TimeInForce = "fok"
@@ -68,6 +73,7 @@ const (
 // MarginMode is "crossed" or "isolated".
 type MarginMode = string
 
+// MarginMode values identify the margin allocation mode.
 const (
 	MarginModeCrossed  MarginMode = "crossed"
 	MarginModeIsolated MarginMode = "isolated"

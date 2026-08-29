@@ -48,7 +48,11 @@ func WithWSURL(url string) WSOption {
 
 // WithWSLogger sets a structured logger for connection lifecycle events.
 func WithWSLogger(l Logger) WSOption {
-	return func(c *WSClient) { c.logger = l }
+	return func(c *WSClient) {
+		if l != nil {
+			c.logger = l
+		}
+	}
 }
 
 // WithWSAutoReconnect toggles automatic reconnection with exponential
@@ -228,7 +232,7 @@ func (c *WSClient) login(ctx context.Context) error {
 	req := models.WSLoginRequest{
 		Op: "login",
 		Args: []models.WSLoginArg{{
-			ApiKey:     c.apiKey,
+			APIKey:     c.apiKey,
 			Passphrase: c.passphrase,
 			Timestamp:  timestamp,
 			Sign:       wsLoginSign(c.secretKey, timestamp),
@@ -317,14 +321,22 @@ func (c *WSClient) Subscribe(ctx context.Context, arg models.WSArg) (<-chan mode
 	key := wsSubKey(arg)
 	c.mu.Lock()
 	sub, exists := c.subscriptions[key]
-	if !exists {
-		sub = &wsSubscription{arg: arg, ch: make(chan models.WSPush, wsSubBufferSize)}
-		c.subscriptions[key] = sub
+	if exists {
+		c.mu.Unlock()
+		return sub.ch, nil
 	}
+	sub = &wsSubscription{arg: arg, ch: make(chan models.WSPush, wsSubBufferSize)}
+	c.subscriptions[key] = sub
 	c.mu.Unlock()
 
 	req := models.WSSubscribeRequest{Op: "subscribe", Args: []models.WSArg{arg}}
 	if err := c.writeJSON(req); err != nil {
+		c.mu.Lock()
+		if c.subscriptions[key] == sub {
+			delete(c.subscriptions, key)
+		}
+		c.mu.Unlock()
+		sub.close()
 		return nil, err
 	}
 	return sub.ch, nil

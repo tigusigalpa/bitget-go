@@ -5,22 +5,22 @@ import (
 	"fmt"
 )
 
-// BitgetError represents a structured error returned by the Bitget UTA API,
+// Error represents a structured error returned by the Bitget UTA API,
 // preserving the exact code/message pair sent back in the response envelope.
 //
 // Docs: https://www.bitget.com/api-doc/uta/guide
-type BitgetError struct {
+type Error struct {
 	Code    string
 	Message string
 	Raw     []byte
 }
 
-func (e *BitgetError) Error() string {
+func (e *Error) Error() string {
 	return fmt.Sprintf("bitget: api error: code=%s, message=%s", e.Code, e.Message)
 }
 
 // Sentinel errors that callers can match with errors.Is, wrapped alongside
-// the detailed *BitgetError (retrievable via errors.As) on every failed call.
+// the detailed *Error (retrievable via errors.As) on every failed call.
 var (
 	ErrUnauthorized      = errors.New("bitget: unauthorized: invalid API credentials")
 	ErrInvalidSignature  = errors.New("bitget: invalid signature")
@@ -35,7 +35,7 @@ var (
 
 // MapErrorCode maps a Bitget API response "code" to a sentinel error so
 // callers can use errors.Is without parsing raw codes themselves. Unknown
-// codes return nil (caller should fall back to the raw *BitgetError).
+// codes return nil (caller should fall back to the raw *Error).
 func MapErrorCode(code string) error {
 	switch code {
 	case "":

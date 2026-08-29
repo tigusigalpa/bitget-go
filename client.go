@@ -193,7 +193,7 @@ func (c *Client) request(ctx context.Context, method, path string, query map[str
 	}
 
 	if env.Code != "" && env.Code != "00000" {
-		bitgetErr := &BitgetError{Code: env.Code, Message: env.Msg, Raw: respBody}
+		bitgetErr := &Error{Code: env.Code, Message: env.Msg, Raw: respBody}
 		if sentinel := MapErrorCode(env.Code); sentinel != nil {
 			return fmt.Errorf("%w: %w", sentinel, bitgetErr)
 		}

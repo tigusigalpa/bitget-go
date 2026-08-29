@@ -138,7 +138,7 @@ func TestDo_MapsSentinelError(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrUnauthorized))
 
-	var bitgetErr *BitgetError
+	var bitgetErr *Error
 	require.True(t, errors.As(err, &bitgetErr))
 	assert.Equal(t, "40001", bitgetErr.Code)
 	assert.Equal(t, "invalid API key", bitgetErr.Message)

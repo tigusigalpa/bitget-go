@@ -36,8 +36,14 @@ func (noopLogger) Error(string, ...any) {}
 // interface.
 type slogLogger struct{ l *slog.Logger }
 
-// NewSlogLogger wraps l so it can be passed to WithLogger.
-func NewSlogLogger(l *slog.Logger) Logger { return &slogLogger{l: l} }
+// NewSlogLogger wraps l so it can be passed to WithLogger. A nil logger uses
+// the same no-op behavior as a client without an explicitly configured logger.
+func NewSlogLogger(l *slog.Logger) Logger {
+	if l == nil {
+		return noopLogger{}
+	}
+	return &slogLogger{l: l}
+}
 
 func (s *slogLogger) Debug(msg string, args ...any) { s.l.Debug(msg, args...) }
 func (s *slogLogger) Info(msg string, args ...any)  { s.l.Info(msg, args...) }
@@ -76,7 +82,11 @@ func WithTimeout(d time.Duration) Option {
 // WithLogger sets a structured logger for request/response diagnostics.
 // Never logs ACCESS-KEY, ACCESS-SIGN, or ACCESS-PASSPHRASE values.
 func WithLogger(l Logger) Option {
-	return func(c *Client) { c.logger = l }
+	return func(c *Client) {
+		if l != nil {
+			c.logger = l
+		}
+	}
 }
 
 // WithLocale sets the "locale" header sent on every request (e.g. "en-US",
