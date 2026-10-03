@@ -2,6 +2,7 @@ package bitget
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -54,6 +55,11 @@ func TestNewPrivateWSClient_DefaultsURLAndCredentials(t *testing.T) {
 func TestWithWSURL_Overrides(t *testing.T) {
 	c := NewPublicWSClient(WithWSURL(DemoPublicWSURL))
 	assert.Equal(t, DemoPublicWSURL, c.url)
+}
+
+func TestSafeWebSocketURL_RedactsUserInfoAndQuery(t *testing.T) {
+	got := safeWebSocketURL("wss://api-key:secret@example.test/stream?token=top-secret#fragment")
+	assert.Equal(t, "wss://example.test/stream", got)
 }
 
 func TestNilLoggersUseNoopLogger(t *testing.T) {
@@ -219,6 +225,19 @@ func TestWSClientHandlesProtocolMessages(t *testing.T) {
 	assert.False(t, sub.send(models.WSPush{}))
 }
 
+func TestWSClientRemovesRejectedSubscription(t *testing.T) {
+	client := NewPublicWSClient()
+	arg := models.WSArg{InstType: "SPOT", Topic: "ticker", Symbol: "BTCUSDT"}
+	sub := &wsSubscription{arg: arg, ch: make(chan models.WSPush, 1)}
+	client.subscriptions[wsSubKey(arg)] = sub
+
+	client.handleMessage([]byte(`{"event":"subscribe","arg":{"instType":"SPOT","topic":"ticker","symbol":"BTCUSDT"},"code":"30001","msg":"rejected"}`))
+
+	assert.NotContains(t, client.subscriptions, wsSubKey(arg))
+	_, open := <-sub.ch
+	assert.False(t, open)
+}
+
 func TestWSClientReconnectHelpers(t *testing.T) {
 	client := NewPublicWSClient()
 	client.resubscribeAll()
@@ -274,4 +293,101 @@ func TestPrivateWSClientConnectsAndReceivesPushes(t *testing.T) {
 		t.Fatal("timed out waiting for push")
 	}
 	require.NoError(t, client.Unsubscribe(arg))
+}
+
+func TestWSClientObservesRawFramesAndSubscriptionACK(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		require.NoError(t, err)
+		defer conn.Close()
+
+		var request models.WSSubscribeRequest
+		require.NoError(t, conn.ReadJSON(&request))
+		require.NoError(t, conn.WriteMessage(websocket.TextMessage, []byte(`{"event":"subscribe","arg":{"instType":"SPOT","topic":"ticker","symbol":"BTCUSDT"}}`)))
+		require.NoError(t, conn.WriteMessage(websocket.TextMessage, []byte(` { "arg" : {"instType":"SPOT","topic":"ticker","symbol":"BTCUSDT"}, "vendorTrace" : "keep-me", "data" : [] } `)))
+		_, _, _ = conn.ReadMessage()
+	}))
+	defer server.Close()
+
+	rawFrames := make(chan RawFrame, 4)
+	events := make(chan WSLifecycleEvent, 8)
+	client := NewPublicWSClient(
+		WithWSURL("ws"+strings.TrimPrefix(server.URL, "http")),
+		WithWSAutoReconnect(false),
+		WithRawFrameHandler(func(frame RawFrame) error {
+			rawFrames <- frame
+			return nil
+		}),
+		WithWSEventHandler(func(event WSLifecycleEvent) { events <- event }),
+	)
+	defer client.Close()
+	require.NoError(t, client.Connect(context.Background()))
+
+	arg := models.WSArg{InstType: "SPOT", Topic: "ticker", Symbol: "BTCUSDT"}
+	_, err := client.Subscribe(context.Background(), arg)
+	require.NoError(t, err)
+
+	var gotRaw RawFrame
+	for i := 0; i < 2; i++ {
+		select {
+		case frame := <-rawFrames:
+			if strings.Contains(string(frame.Payload), "vendorTrace") {
+				gotRaw = frame
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for raw frame")
+		}
+	}
+	assert.Contains(t, string(gotRaw.Payload), `"vendorTrace" : "keep-me"`)
+	assert.False(t, gotRaw.ReceivedAt.IsZero())
+	assert.Greater(t, gotRaw.Generation, uint64(0))
+
+	seenRequested, seenSubscribed := false, false
+	deadline := time.After(time.Second)
+	for !seenRequested || !seenSubscribed {
+		select {
+		case event := <-events:
+			if event.Arg != nil && *event.Arg == arg {
+				seenRequested = seenRequested || event.Type == WSSubscriptionRequested
+				seenSubscribed = seenSubscribed || event.Type == WSSubscribed
+			}
+		case <-deadline:
+			t.Fatalf("missing lifecycle events: requested=%t subscribed=%t", seenRequested, seenSubscribed)
+		}
+	}
+}
+
+func TestWSClientReportsRawObserverFailure(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		require.NoError(t, err)
+		defer conn.Close()
+		require.NoError(t, conn.WriteMessage(websocket.TextMessage, []byte(`{"event":"subscribe"}`)))
+		_, _, _ = conn.ReadMessage()
+	}))
+	defer server.Close()
+
+	events := make(chan WSLifecycleEvent, 4)
+	client := NewPublicWSClient(
+		WithWSURL("ws"+strings.TrimPrefix(server.URL, "http")),
+		WithWSAutoReconnect(false),
+		WithRawFrameHandler(func(RawFrame) error { return errors.New("stop consumer") }),
+		WithWSEventHandler(func(event WSLifecycleEvent) { events <- event }),
+	)
+	defer client.Close()
+	require.NoError(t, client.Connect(context.Background()))
+
+	for {
+		select {
+		case event := <-events:
+			if event.Type == WSTerminal {
+				assert.ErrorContains(t, event.Err, "stop consumer")
+				return
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for terminal lifecycle event")
+		}
+	}
 }

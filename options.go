@@ -60,8 +60,9 @@ func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) { c.httpClient = hc }
 }
 
-// WithBaseURL overrides the REST base URL, e.g. for Bitget's Lo-La
-// (VIP/institutional) endpoint or a test server.
+// WithBaseURL overrides the REST base URL, e.g. for Bitget's VIP endpoint
+// or a test server. Pass an origin without a trailing API path: SDK methods
+// add their own /api/v3/... path.
 func WithBaseURL(baseURL string) Option {
 	return func(c *Client) { c.baseURL = baseURL }
 }

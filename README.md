@@ -1,61 +1,25 @@
 # Bitget Go SDK
 
-![Bitget Golang SDK](https://i.postimg.cc/j2ZkYg04/bitget-golang-github.jpg)
-
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue)](go.mod)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Go Reference](https://pkg.go.dev/badge/github.com/tigusigalpa/bitget-go.svg)](https://pkg.go.dev/github.com/tigusigalpa/bitget-go)
 [![Tests](https://github.com/tigusigalpa/bitget-go/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/tigusigalpa/bitget-go/actions/workflows/test.yml)
 [![Codecov](https://codecov.io/gh/tigusigalpa/bitget-go/graph/badge.svg)](https://codecov.io/gh/tigusigalpa/bitget-go)
-[![CodeQL](https://github.com/tigusigalpa/bitget-go/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/tigusigalpa/bitget-go/actions/workflows/codeql.yml)
 
-A clean, idiomatic Go SDK for the [Bitget Unified Trading Account (UTA) API v3](https://www.bitget.com/api-doc/uta/intro). Built for developers who want reliable market data, account management, and trading — without wrestling with raw HTTP signatures or silently losing precision to `float64`.
+An intentionally small, typed Go client for the [Bitget Unified Trading Account (UTA) API v3](https://www.bitget.com/docs/uta/quick-start). It takes care of request signing, response envelopes, WebSocket lifecycle, and numeric precision, while leaving trading decisions entirely in your application.
 
-> 📖 **[Full documentation available on Wiki](https://github.com/tigusigalpa/bitget-go/wiki)**
+It is not an official Bitget SDK and it does not execute a request during import or client creation.
 
-A matching PHP/Laravel SDK lives at [tigusigalpa/bitget-php](https://github.com/tigusigalpa/bitget-php) if you also run services in that ecosystem.
+## Start here
 
----
-
-## Why this SDK?
-
-Bitget's API is powerful, but building against raw HTTP can be tedious: signature schemes, subtle parameter encoding, reconnecting WebSockets, and the eternal problem of floating-point rounding in financial data. This package handles the boilerplate so you can focus on your trading logic.
-
-It is intentionally **dependency-light** and **Go-idiomatic**:
-
-- `context.Context` is the first argument on every network call, so cancellation and timeouts behave the way you expect in Go.
-- You can inject your own `*http.Client` for proxies, custom transports, or test doubles.
-- Prices, quantities, PnL, and fees are returned as `string`, so you never lose a satoshi to `float64` rounding.
-- Every endpoint returns a typed `models.BitgetResponse[T]` envelope instead of `interface{}`.
-- WebSockets reconnect automatically with exponential backoff and resubscribe to your channels.
-- Errors are plain Go sentinel errors (`errors.Is`) plus a typed `*BitgetError` (`errors.As`) for detailed API messages.
-- Only one required runtime dependency: `gorilla/websocket`. `stretchr/testify` is test-only.
-
----
-
-## Installation
+Use a public REST example first. It needs no credentials and never touches an account:
 
 ```bash
 go get github.com/tigusigalpa/bitget-go
+go run ./examples/rest
 ```
 
-Requires Go 1.21 or newer.
-
----
-
-## Quick start
-
-### 1. Get your API credentials
-
-Log in to the [Bitget console](https://www.bitget.com/support/en-US/articles/360007388154-How-to-Create-API-Key), create an API key, and save:
-
-- `BITGET_API_KEY`
-- `BITGET_SECRET_KEY`
-- `BITGET_PASSPHRASE`
-
-For your own safety, start with a **Demo API key**. You can switch to production later by changing the credentials and removing demo mode.
-
-### 2. Make your first call
+The module requires Go 1.21 or newer. Prices, quantities, balances, fees, and timestamps are represented as strings where the API returns strings. That avoids accidental `float64` rounding in financial code.
 
 ```go
 package main
@@ -64,89 +28,161 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 
 	bitget "github.com/tigusigalpa/bitget-go"
 	"github.com/tigusigalpa/bitget-go/models"
 )
 
 func main() {
-	client := bitget.NewRestClient(
-		os.Getenv("BITGET_API_KEY"),
-		os.Getenv("BITGET_SECRET_KEY"),
-		os.Getenv("BITGET_PASSPHRASE"),
-	)
-
+	client := bitget.NewRestClient("", "", "") // public endpoints need no key
 	tickers, err := client.Market.GetTickers(context.Background(), models.CategorySpot, "BTCUSDT")
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	if len(tickers) > 0 {
 		fmt.Printf("BTC/USDT last price: %s\n", tickers[0].LastPrice)
 	}
 }
 ```
 
-That's it — the SDK signs the request, sets the right headers, parses the response envelope, and gives you typed data.
+## Choose the smallest client for the job
 
----
+| Need | Create | Credentials | What it does |
+|---|---|---|---|
+| Snapshot market data | `NewRestClient("", "", "")` | No | Public REST calls such as tickers and order book |
+| Account, orders, positions | `NewRestClient(key, secret, passphrase)` | Yes | Signed private REST calls |
+| Live public market feed | `NewPublicWSClient()` | No | Subscribes to public WebSocket channels |
+| Private fills and account feed | `NewPrivateWSClient(key, secret, passphrase)` | Yes | Logs in to a private WebSocket and subscribes to its channels |
 
-## Configuration
+There is no automatic switch between public and private APIs, production and demo endpoints, or REST and WebSocket. You choose the transport and credentials explicitly.
 
-`NewRestClient` accepts functional options so you can tune behavior without breaking the simple constructor:
+## Demo credentials before production
 
-| Option | Description | Default |
-|---|---|---|
-| `WithHTTPClient(*http.Client)` | Inject a custom HTTP client (proxy, custom TLS, tracing, etc.) | `&http.Client{Timeout: 15s}` |
-| `WithBaseURL(string)` | Override the REST base URL | `https://api.bitget.com` |
-| `WithDemoTrading()` | Send `paptrading: 1` on every request. Use with a Demo API key. | disabled |
-| `WithTimeout(time.Duration)` | Timeout for the internally built HTTP client | `15s` |
-| `WithLogger(Logger)` | Structured logger. Keys and signatures are never logged. | no-op |
-| `WithLocale(string)` | `locale` header value | `en-US` |
+Create a separate **Demo API key** in Bitget. Keep all three values outside source control:
 
-Example with a custom HTTP client:
+- `BITGET_API_KEY`
+- `BITGET_SECRET_KEY`
+- `BITGET_PASSPHRASE`
+
+Bitget requires the `paptrading: 1` header for demo REST requests. `WithDemoTrading()` adds it. The accompanying private examples additionally refuse to run until `BITGET_DEMO=1` is set; this is a guard against accidentally pointing copied code at a production account.
 
 ```go
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+
 client := bitget.NewRestClient(
 	os.Getenv("BITGET_API_KEY"),
 	os.Getenv("BITGET_SECRET_KEY"),
 	os.Getenv("BITGET_PASSPHRASE"),
-	bitget.WithHTTPClient(&http.Client{
-		Timeout:   30 * time.Second,
-		Transport: myProxyTransport,
-	}),
 	bitget.WithDemoTrading(),
 )
+
+assets, err := client.Account.GetAssets(ctx)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println("demo USD equity:", assets.AccountEquity)
 ```
 
----
+Run the complete safe demo-account example with:
 
-## REST API coverage (Phase 1)
+```bash
+BITGET_DEMO=1 BITGET_API_KEY=... BITGET_SECRET_KEY=... BITGET_PASSPHRASE=... go run ./examples/demo-account
+```
 
-| Category | Methods | Official docs |
+Never put keys, passphrases, signatures, or `.env` files in a repository or issue. Bind an IP address to an API key where possible. See Bitget's [API-key security guidance](https://www.bitget.com/docs/uta/quick-start#access-setup).
+
+## Configuration
+
+The defaults target Bitget's regular UTA domains. A supplied `*http.Client` is used as-is; the SDK does not rewrite its timeout or transport.
+
+| Option | Default | Use it for |
 |---|---|---|
-| **Market** (public) | `GetInstruments`, `GetTickers`, `GetOrderBook` | [Instruments](https://www.bitget.com/api-doc/uta/public/Instruments) · [Tickers](https://www.bitget.com/api-doc/uta/public/Tickers) · [OrderBook](https://www.bitget.com/api-doc/uta/public/OrderBook) |
-| **Account** (private) | `GetAssets`, `GetSettings`, `SetLeverage` | [Get-Account](https://www.bitget.com/api-doc/uta/account/Get-Account) · [Get-Account-Setting](https://www.bitget.com/api-doc/uta/account/Get-Account-Setting) · [Change-Leverage](https://www.bitget.com/api-doc/uta/account/Change-Leverage) |
-| **Trade** (private) | `PlaceOrder`, `ModifyOrder`, `CancelOrder`, `GetOpenOrders`, `GetOrderHistory`, `GetPositions` | [Place-Order](https://www.bitget.com/api-doc/uta/trade/Place-Order) · [Modify-Order](https://www.bitget.com/api-doc/uta/trade/Modify-Order) · [Cancel-Order](https://www.bitget.com/api-doc/uta/trade/Cancel-Order) · [Get-Order-Pending](https://www.bitget.com/api-doc/uta/trade/Get-Order-Pending) · [Get-Order-History](https://www.bitget.com/api-doc/uta/trade/Get-Order-History) · [Get-Position](https://www.bitget.com/api-doc/uta/trade/Get-Position) |
+| `WithHTTPClient(*http.Client)` | Internal client with 15-second timeout | Proxy, custom TLS, tracing, or test transport |
+| `WithTimeout(time.Duration)` | `15s` | Timeout of the internally created HTTP client |
+| `WithBaseURL(string)` | `https://api.bitget.com` | A test server or Bitget VIP base origin |
+| `WithDemoTrading()` | Off | REST requests made with a Demo API key |
+| `WithLocale(string)` | `en-US` | Bitget's `locale` header |
+| `WithLogger(Logger)` | No-op | Structured REST lifecycle logs |
+| `WithWSURL(string)` | Public/private production URL | Demo, VIP, or test WebSocket endpoint |
+| `WithWSAutoReconnect(bool)` | On | Disable automatic reconnect for a short-lived consumer |
+| `WithWSLogger(Logger)` | No-op | Structured WebSocket lifecycle logs |
 
-For the exact HTTP methods, paths, and query/body parameters, see [docs/endpoints.md](docs/endpoints.md).
-
-### A note about demo trading
-
-If you set `WithDemoTrading()`, every REST request carries the `paptrading: 1` header. Make sure you are using **Demo API credentials** — mixing demo mode with production credentials will fail. The trading example in [examples/rest/main.go](examples/rest/main.go) is gated behind both `BITGET_DEMO=1` and `BITGET_ENABLE_TRADING=1` so it cannot accidentally place a live order.
-
----
-
-## WebSocket
-
-Real-time data is where Go really shines. The SDK gives you a streaming channel and handles reconnection behind the scenes.
-
-### Public channels
+`WithBaseURL` expects an origin, not a path ending in `/api/v3`: endpoint methods add their own `/api/v3/...` path. Bitget documents the production, demo, and VIP domains in its [Quick Start](https://www.bitget.com/docs/uta/quick-start#domain-name).
 
 ```go
-ws := bitget.NewPublicWSClient()
+httpClient := &http.Client{Timeout: 30 * time.Second, Transport: myTransport}
+client := bitget.NewRestClient("", "", "", bitget.WithHTTPClient(httpClient))
+```
 
+## Implemented REST coverage
+
+This is a focused Phase 1 surface. Methods not listed here are not implemented yet.
+
+| Service | Methods |
+|---|---|
+| `Market` (public) | `GetInstruments`, `GetTickers`, `GetOrderBook`, `GetCandles`, `GetPublicFills`, `GetFundingRateHistory` |
+| `Account` (private) | `GetAssets`, `GetSettings`, `SetLeverage` |
+| `Trade` (private) | `PlaceOrder`, `ModifyOrder`, `CancelOrder`, `GetOpenOrders`, `GetOrderHistory`, `GetPositions` |
+
+See [docs/endpoints.md](docs/endpoints.md) for the exact HTTP paths and Bitget documentation for each method. Model fields are deliberately forward-compatible strings where a future API value should not be rejected by a closed enum.
+
+### Pages, cursors, and cancellation
+
+Order-list endpoints return a `Cursor`. Pass it back only after you have processed the current page. Give every request a deadline appropriate for your application.
+
+```go
+page, err := client.Trade.GetOpenOrders(ctx, trade.GetOpenOrdersOptions{
+	Category: models.CategorySpot,
+	Limit:    "100",
+})
+if err != nil {
+	return err
+}
+
+for _, order := range page.List {
+	// Persist or handle order before asking for the next page.
+}
+if page.Cursor != "" {
+	// Request the next page with Cursor: page.Cursor.
+}
+```
+
+Do not automatically retry an order placement after a timeout: the exchange may have accepted it even when your process did not receive a response. Use a unique `ClientOid` and then query the order state. For read-only requests, build your own retry policy around `ErrRateLimited`, context cancellation, and the endpoint-specific limits.
+
+## Error handling
+
+The package keeps Bitget's response code and message in `*bitget.Error`; use `errors.Is` for stable classifications and `errors.As` for details. A 429 response retains both `ErrRateLimited` and its API error payload when Bitget supplies one.
+
+```go
+assets, err := client.Account.GetAssets(ctx)
+if err != nil {
+	if errors.Is(err, bitget.ErrRateLimited) {
+		// Back off according to the endpoint's documented limit.
+		return
+	}
+
+	var apiErr *bitget.Error
+	if errors.As(err, &apiErr) {
+		log.Printf("Bitget rejected the request: code=%s message=%s", apiErr.Code, apiErr.Message)
+		return
+	}
+
+	log.Printf("transport or decoding failure: %v", err)
+}
+```
+
+Available classifications include `ErrUnauthorized`, `ErrInvalidSignature`, `ErrInvalidTimestamp`, `ErrPermissionDenied`, `ErrRateLimited`, `ErrInvalidParameter`, `ErrInsufficientFunds`, `ErrOrderNotFound`, and `ErrInternalServer`.
+
+## WebSocket lifecycle
+
+Use a context that you can cancel and always close the client. The client sends `ping`, expects `pong`, reconnects with exponential backoff after an unexpected disconnect, and resubscribes its active channels. It does not promise exactly-once or globally ordered delivery: make downstream processing idempotent, and deduplicate events using exchange IDs when a channel provides them.
+
+```go
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+defer stop()
+
+ws := bitget.NewPublicWSClient()
 if err := ws.Connect(ctx); err != nil {
 	log.Fatal(err)
 }
@@ -161,135 +197,63 @@ if err != nil {
 	log.Fatal(err)
 }
 
-for push := range pushes {
-	fmt.Println(string(push.Data))
+for {
+	select {
+	case <-ctx.Done():
+		return
+	case push, ok := <-pushes:
+		if !ok {
+			return
+		}
+		fmt.Println(string(push.Data))
+	}
 }
 ```
 
-### Private channels
+Each subscription has a 100-message buffer. If the consumer cannot keep up, the SDK drops the newest push and emits a warning through the configured WebSocket logger. For high-volume channels, process messages promptly, keep the handler non-blocking, and use a durable queue in your own application if loss is unacceptable.
 
-Use `NewPrivateWSClient(apiKey, secretKey, passphrase)`. Authentication happens automatically during `Connect`.
+For a lossless, provenance-sensitive path, configure `WithRawFrameHandler`.
+It is called synchronously with an exact copied payload, immediate local receipt
+time, and connection generation before the SDK decodes JSON or writes to a
+subscriber buffer. Pair it with `WithWSEventHandler` to observe subscription
+requests, Bitget ACKs/errors and terminal raw-observer failures by channel
+`arg`. These callbacks deliberately apply backpressure; keep their work short
+or hand off to your own durable queue. Mark a subscription ready only after a
+`WSSubscribed` event for the current connection generation; an error with an
+`arg` closes and removes that rejected subscription.
 
-```go
-ws := bitget.NewPrivateWSClient(
-	os.Getenv("BITGET_API_KEY"),
-	os.Getenv("BITGET_SECRET_KEY"),
-	os.Getenv("BITGET_PASSPHRASE"),
-)
-```
+The public `examples/websocket` program is credential-free. The private `examples/websocket-private` program uses Bitget's Demo private endpoint explicitly and decodes the typed `fast-fill` payload.
 
-On an unexpected disconnect, the client:
+Bitget documents a maximum of 10 WebSocket messages per second, recommends fewer than 50 channel subscriptions per connection, and publishes connection/subscription caps. Design a connection pool and resubscription cadence around those limits rather than opening a connection per symbol. [WebSocket connection guidance](https://www.bitget.com/docs/uta/quick-start#websocket)
 
-1. Backs off exponentially from 1 second up to a 60-second cap.
-2. Reconnects.
-3. Resubscribes every channel you previously opened.
+## Runnable examples
 
-Implemented private channel: [`fast-fill`](https://www.bitget.com/api-doc/uta/websocket/private/Fast-Fill-Channel). Other channels use the same `Subscribe`/`WSPush.Data` shape; check [docs/endpoints.md](docs/endpoints.md) to see which payloads are already typed and which you should decode from `push.Data` yourself.
+| Program | What it demonstrates | Credentials |
+|---|---|---|
+| [`examples/rest`](examples/rest/main.go) | Public ticker and safe order-book access | None |
+| [`examples/demo-account`](examples/demo-account/main.go) | Demo-only signed account read | Demo key + `BITGET_DEMO=1` |
+| [`examples/websocket`](examples/websocket/main.go) | Public ticker subscription, signal cancellation | None |
+| [`examples/websocket-private`](examples/websocket-private/main.go) | Demo private `fast-fill` subscription and payload decoding | Demo key + `BITGET_DEMO=1` |
 
----
-
-## Error handling
-
-The SDK returns plain errors you can check with the standard library:
-
-```go
-_, err := client.Account.GetAssets(ctx)
-if err != nil {
-	if errors.Is(err, bitget.ErrUnauthorized) {
-		// Most likely the API key, secret, or passphrase is wrong.
-		log.Println("authentication failed — check your credentials")
-		return
-	}
-
-	var bitgetErr *bitget.Error
-	if errors.As(err, &bitgetErr) {
-		// Bitget returned a business-level error.
-		log.Printf("Bitget error %s: %s", bitgetErr.Code, bitgetErr.Message)
-		return
-	}
-
-	// Network or timeout issue.
-	log.Printf("request failed: %v", err)
-}
-```
-
-Common `errors.Is` checks include network timeouts and context cancellation, because the SDK propagates those transparently.
-
----
-
-## Running the tests
+## Development
 
 ```bash
-# Unit tests — fast, offline, backed by httptest
 go test ./...
+go test -race ./...
+go vet ./...
+gofmt -l .
+```
 
-# Integration tests against Bitget demo environment.
-# Requires BITGET_API_KEY, BITGET_SECRET_KEY, and BITGET_PASSPHRASE to be set.
+Integration tests are opt-in and never receive a credential in CI:
+
+```bash
 go test -tags=integration ./...
 ```
 
-We strongly recommend running integration tests with **demo credentials** before you point any code at a live account.
+The public integration test contacts Bitget. The private integration test is skipped unless all three `BITGET_*` variables are present, and uses demo mode.
 
----
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. For exact endpoint coverage, see [docs/endpoints.md](docs/endpoints.md). For a security report, see [SECURITY.md](SECURITY.md).
 
-## Examples
+## License and attribution
 
-Two runnable examples are included:
-
-- [`examples/rest/main.go`](examples/rest/main.go) — market data, account info, and placing a demo order.
-- [`examples/websocket/main.go`](examples/websocket/main.go) — public and private WebSocket subscriptions.
-
-Copy them, set your environment variables, and run:
-
-```bash
-BITGET_API_KEY=xxx BITGET_SECRET_KEY=xxx BITGET_PASSPHRASE=xxx go run examples/rest/main.go
-```
-
----
-
-## A few practical tips
-
-1. **Use strings for money.** All numeric financial fields are `string` in the SDK. Use `math/big.Rat` or a decimal library of your choice; avoid `strconv.ParseFloat` when precision matters.
-2. **Start on demo.** Even experienced traders should validate new code against demo keys first. Markets move fast; a bug in order size or symbol formatting can be expensive.
-3. **Respect rate limits.** The SDK does not throttle for you. Bitget publishes rate-limit headers; if you need heavy polling, consider WebSockets instead of REST.
-4. **Pass contexts with deadlines.** This is especially important for trading endpoints where a slow request may no longer be relevant by the time it completes.
-5. **Check errors by type.** Use `errors.Is` for known sentinel errors and `errors.As` for `*BitgetError` to avoid fragile string matching.
-
----
-
-## Contributing
-
-Contributions, bug reports, and suggestions are welcome. Please see [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, code style, and how to add new endpoints or channels.
-
-A good first issue is often adding a missing endpoint model or improving test coverage.
-
----
-
-## Security
-
-Found something that should not be public? Please email **sovletig@gmail.com** directly rather than opening a public issue. We will investigate and fix it as quickly as possible.
-
-The SDK itself never logs API keys, secrets, or signatures, regardless of the logger you inject.
-
----
-
-## License
-
-MIT. See [LICENSE](LICENSE).
-
----
-
-## Author
-
-Igor Sazonov — [@tigusigalpa](https://github.com/tigusigalpa) — sovletig@gmail.com
-
-## Useful links
-
-- [Bitget UTA API documentation](https://www.bitget.com/api-doc/uta/intro)
-- [GitHub repository](https://github.com/tigusigalpa/bitget-go)
-- [GitHub Wiki documentation](https://github.com/tigusigalpa/bitget-go/wiki)
-- [Issue tracker](https://github.com/tigusigalpa/bitget-go/issues)
-
----
-
-*Not affiliated with Bitget. Trade carefully, test on demo first, and never commit API credentials to source control.*
+MIT — see [LICENSE](LICENSE). Maintained by [Igor Sazonov](https://github.com/tigusigalpa). This project is not affiliated with Bitget.

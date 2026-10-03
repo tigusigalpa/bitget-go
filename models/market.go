@@ -90,3 +90,41 @@ type OrderBook struct {
 	Bids []OrderBookLevel `json:"b"`
 	Ts   string           `json:"ts"`
 }
+
+// Candle is one [timestamp, open, high, low, close, base-volume,
+// quote-turnover] entry returned by Bitget's Kline endpoint. Every value is
+// kept as a string because Bitget returns exact decimal text.
+//
+// Docs: https://www.bitget.com/docs/catalog/market/market-data
+type Candle [7]string
+
+// PublicFill is one recent public trade reported by Bitget. Size is quoted
+// in the quote coin for COIN-FUTURES and the base coin for other categories.
+//
+// Docs: https://www.bitget.com/docs/catalog/market/market-data
+type PublicFill struct {
+	ExecID     string `json:"execId"`
+	ExecLinkID string `json:"execLinkId"`
+	Price      string `json:"price"`
+	Size       string `json:"size"`
+	Side       string `json:"side"`
+	Ts         string `json:"ts"`
+	IsRPI      string `json:"isRPI"`
+}
+
+// FundingRate is one realized funding-rate record. FundingRateTimestamp is a
+// Unix timestamp in milliseconds; the funding interval must be obtained from
+// the corresponding Instrument rather than assumed by callers.
+//
+// Docs: https://www.bitget.com/legacy-docs/uta/public/Get-History-Funding-Rate
+type FundingRate struct {
+	Symbol               string `json:"symbol"`
+	FundingRate          string `json:"fundingRate"`
+	FundingRateTimestamp string `json:"fundingRateTimestamp"`
+}
+
+// FundingRateHistory is the paged result returned by the historical funding
+// rate endpoint.
+type FundingRateHistory struct {
+	ResultList []FundingRate `json:"resultList"`
+}

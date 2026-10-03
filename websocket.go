@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"sync"
 	"time"
@@ -40,6 +41,56 @@ const (
 // WSOption configures a WSClient at construction time.
 type WSOption func(*WSClient)
 
+// RawFrame is an exact WebSocket message received from Bitget before the SDK
+// decodes it. Payload is a private copy and must be treated as read-only.
+// Generation increases after every successful connection; ReceivedAt is taken
+// immediately after the network read completes.
+type RawFrame struct {
+	Payload    []byte
+	ReceivedAt time.Time
+	Generation uint64
+}
+
+// RawFrameHandler observes every received WebSocket message synchronously.
+// It is the lossless canonical path for consumers that need exact wire data.
+// Keep it short or apply backpressure deliberately. Returning an error emits
+// a terminal lifecycle event and disconnects the current connection.
+type RawFrameHandler func(RawFrame) error
+
+// WSLifecycleType identifies a WebSocket connection or subscription event.
+type WSLifecycleType string
+
+// WSLifecycle event types are delivered to a WSEventHandler.
+const (
+	WSConnected               WSLifecycleType = "connected"
+	WSDisconnected            WSLifecycleType = "disconnected"
+	WSClosed                  WSLifecycleType = "closed"
+	WSAuthenticated           WSLifecycleType = "authenticated"
+	WSSubscriptionRequested   WSLifecycleType = "subscription_requested"
+	WSSubscribed              WSLifecycleType = "subscribed"
+	WSUnsubscriptionRequested WSLifecycleType = "unsubscription_requested"
+	WSUnsubscribed            WSLifecycleType = "unsubscribed"
+	WSProviderError           WSLifecycleType = "provider_error"
+	WSTerminal                WSLifecycleType = "terminal"
+)
+
+// WSLifecycleEvent reports the observable control-plane lifecycle. Arg is
+// copied from Bitget's control event, allowing callers to correlate an ACK or
+// provider error to a subscription. Err is non-nil for local terminal errors.
+type WSLifecycleEvent struct {
+	Type       WSLifecycleType
+	Arg        *models.WSArg
+	Code       string
+	Message    string
+	Err        error
+	ReceivedAt time.Time
+	Generation uint64
+}
+
+// WSEventHandler handles lifecycle events synchronously. It must return
+// promptly and must not panic; the SDK does not buffer or drop these events.
+type WSEventHandler func(WSLifecycleEvent)
+
 // WithWSURL overrides the WebSocket endpoint, e.g. for Bitget's demo/paper
 // trading WS or the Lo-La VIP endpoint.
 func WithWSURL(url string) WSOption {
@@ -53,6 +104,19 @@ func WithWSLogger(l Logger) WSOption {
 			c.logger = l
 		}
 	}
+}
+
+// WithRawFrameHandler installs the canonical, synchronous raw-frame observer.
+// It receives a full immutable copy before JSON decoding and before the
+// bounded WSPush subscriber buffers are considered.
+func WithRawFrameHandler(handler RawFrameHandler) WSOption {
+	return func(c *WSClient) { c.rawFrameHandler = handler }
+}
+
+// WithWSEventHandler installs a synchronous observer for connection and
+// subscription lifecycle events, including subscribe ACKs and provider errors.
+func WithWSEventHandler(handler WSEventHandler) WSOption {
+	return func(c *WSClient) { c.eventHandler = handler }
 }
 
 // WithWSAutoReconnect toggles automatic reconnection with exponential
@@ -82,8 +146,10 @@ type WSClient struct {
 	passphrase string
 	private    bool
 
-	logger        Logger
-	autoReconnect bool
+	logger          Logger
+	autoReconnect   bool
+	rawFrameHandler RawFrameHandler
+	eventHandler    WSEventHandler
 
 	mu            sync.RWMutex
 	writeMu       sync.Mutex
@@ -95,6 +161,7 @@ type WSClient struct {
 	done          chan struct{}
 	loginWait     chan error
 	lastPong      time.Time
+	generation    uint64
 }
 
 // NewPublicWSClient creates a client for Bitget's public market-data
@@ -216,9 +283,28 @@ func (c *WSClient) dial(ctx context.Context) error {
 	}
 	c.conn = conn
 	c.lastPong = time.Now()
+	c.generation++
+	generation := c.generation
 	c.mu.Unlock()
-	c.logger.Info("bitget: websocket connected", "url", c.url)
+	c.logger.Info("bitget: websocket connected", "url", safeWebSocketURL(c.url))
+	c.notifyEvent(WSLifecycleEvent{Type: WSConnected, ReceivedAt: time.Now(), Generation: generation})
 	return nil
+}
+
+// safeWebSocketURL removes a custom endpoint's user info, query string, and
+// fragment before it reaches a logger. A query string is not needed to
+// identify a Bitget endpoint and can contain a credential when callers use a
+// proxy or a custom gateway.
+func safeWebSocketURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "[invalid WebSocket URL]"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	return u.String()
 }
 
 func (c *WSClient) login(ctx context.Context) error {
@@ -339,6 +425,12 @@ func (c *WSClient) Subscribe(ctx context.Context, arg models.WSArg) (<-chan mode
 		sub.close()
 		return nil, err
 	}
+	c.notifyEvent(WSLifecycleEvent{
+		Type:       WSSubscriptionRequested,
+		Arg:        copyWSArg(&arg),
+		ReceivedAt: time.Now(),
+		Generation: c.currentGeneration(),
+	})
 	return sub.ch, nil
 }
 
@@ -359,7 +451,16 @@ func (c *WSClient) Unsubscribe(arg models.WSArg) error {
 	sub.close()
 
 	req := models.WSSubscribeRequest{Op: "unsubscribe", Args: []models.WSArg{arg}}
-	return c.writeJSON(req)
+	if err := c.writeJSON(req); err != nil {
+		return err
+	}
+	c.notifyEvent(WSLifecycleEvent{
+		Type:       WSUnsubscriptionRequested,
+		Arg:        copyWSArg(&arg),
+		ReceivedAt: time.Now(),
+		Generation: c.currentGeneration(),
+	})
+	return nil
 }
 
 func (s *wsSubscription) send(push models.WSPush) bool {
@@ -409,8 +510,11 @@ func (c *WSClient) Close() error {
 		sub.close()
 	}
 	if conn != nil {
-		return conn.Close()
+		err := conn.Close()
+		c.notifyEvent(WSLifecycleEvent{Type: WSClosed, ReceivedAt: time.Now(), Generation: c.currentGeneration()})
+		return err
 	}
+	c.notifyEvent(WSLifecycleEvent{Type: WSClosed, ReceivedAt: time.Now(), Generation: c.currentGeneration()})
 	return nil
 }
 
@@ -469,6 +573,23 @@ func (c *WSClient) readPump() {
 			return
 		}
 
+		receivedAt := time.Now()
+		if err := c.observeRawFrame(message, receivedAt); err != nil {
+			terminalErr := fmt.Errorf("bitget: raw frame handler: %w", err)
+			c.logger.Error("bitget: websocket raw frame handler failed", "error", terminalErr)
+			c.completeLogin(terminalErr)
+			c.notifyEvent(WSLifecycleEvent{
+				Type:       WSTerminal,
+				Err:        terminalErr,
+				ReceivedAt: receivedAt,
+				Generation: c.currentGeneration(),
+			})
+			if current, active := c.disconnect(conn); current && active {
+				c.startReconnect()
+			}
+			return
+		}
+
 		if string(message) == "pong" {
 			c.mu.Lock()
 			if c.conn == conn {
@@ -489,10 +610,12 @@ func (c *WSClient) disconnect(conn *websocket.Conn) (bool, bool) {
 		return false, false
 	}
 	active := c.active
+	generation := c.generation
 	c.conn = nil
 	c.active = false
 	c.mu.Unlock()
 	_ = conn.Close()
+	c.notifyEvent(WSLifecycleEvent{Type: WSDisconnected, ReceivedAt: time.Now(), Generation: generation})
 	return true, active
 }
 
@@ -522,13 +645,33 @@ func (c *WSClient) handleMessage(message []byte) {
 		switch event.Event {
 		case "login":
 			if event.Code != "" && event.Code != "0" {
-				c.completeLogin(fmt.Errorf("bitget: websocket login failed: code=%s, message=%s", event.Code, event.Msg))
+				loginErr := fmt.Errorf("bitget: websocket login failed: code=%s, message=%s", event.Code, event.Msg)
+				c.completeLogin(loginErr)
+				c.notifyEvent(c.lifecycleEvent(WSProviderError, event, loginErr))
 				return
 			}
 			c.completeLogin(nil)
+			c.notifyEvent(c.lifecycleEvent(WSAuthenticated, event, nil))
+		case "subscribe":
+			if event.Code != "" && event.Code != "0" {
+				providerErr := fmt.Errorf("bitget: websocket subscribe failed: code=%s, message=%s", event.Code, event.Msg)
+				c.removeSubscription(event.Arg)
+				c.notifyEvent(c.lifecycleEvent(WSProviderError, event, providerErr))
+				return
+			}
+			c.notifyEvent(c.lifecycleEvent(WSSubscribed, event, nil))
+		case "unsubscribe":
+			if event.Code != "" && event.Code != "0" {
+				providerErr := fmt.Errorf("bitget: websocket unsubscribe failed: code=%s, message=%s", event.Code, event.Msg)
+				c.notifyEvent(c.lifecycleEvent(WSProviderError, event, providerErr))
+				return
+			}
+			c.notifyEvent(c.lifecycleEvent(WSUnsubscribed, event, nil))
 		case "error":
 			loginErr := fmt.Errorf("bitget: websocket error event: code=%s, message=%s", event.Code, event.Msg)
 			c.completeLogin(loginErr)
+			c.removeSubscription(event.Arg)
+			c.notifyEvent(c.lifecycleEvent(WSProviderError, event, loginErr))
 			c.logger.Error("bitget: websocket error event", "code", event.Code, "msg", event.Msg)
 		}
 		return
@@ -604,5 +747,74 @@ func (c *WSClient) resubscribeAll() {
 	req := models.WSSubscribeRequest{Op: "subscribe", Args: args}
 	if err := c.writeJSON(req); err != nil {
 		c.logger.Warn("bitget: websocket resubscribe failed", "error", err)
+		return
+	}
+	for _, arg := range args {
+		c.notifyEvent(WSLifecycleEvent{
+			Type:       WSSubscriptionRequested,
+			Arg:        copyWSArg(&arg),
+			ReceivedAt: time.Now(),
+			Generation: c.currentGeneration(),
+		})
+	}
+}
+
+func (c *WSClient) observeRawFrame(payload []byte, receivedAt time.Time) error {
+	if c.rawFrameHandler == nil {
+		return nil
+	}
+	frame := RawFrame{
+		Payload:    append([]byte(nil), payload...),
+		ReceivedAt: receivedAt,
+		Generation: c.currentGeneration(),
+	}
+	return c.rawFrameHandler(frame)
+}
+
+func (c *WSClient) lifecycleEvent(eventType WSLifecycleType, event models.WSEvent, err error) WSLifecycleEvent {
+	return WSLifecycleEvent{
+		Type:       eventType,
+		Arg:        copyWSArg(event.Arg),
+		Code:       event.Code,
+		Message:    event.Msg,
+		Err:        err,
+		ReceivedAt: time.Now(),
+		Generation: c.currentGeneration(),
+	}
+}
+
+func (c *WSClient) notifyEvent(event WSLifecycleEvent) {
+	if c.eventHandler != nil {
+		c.eventHandler(event)
+	}
+}
+
+func (c *WSClient) currentGeneration() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.generation
+}
+
+func copyWSArg(arg *models.WSArg) *models.WSArg {
+	if arg == nil {
+		return nil
+	}
+	copy := *arg
+	return &copy
+}
+
+func (c *WSClient) removeSubscription(arg *models.WSArg) {
+	if arg == nil {
+		return
+	}
+	key := wsSubKey(*arg)
+	c.mu.Lock()
+	sub, ok := c.subscriptions[key]
+	if ok {
+		delete(c.subscriptions, key)
+	}
+	c.mu.Unlock()
+	if ok {
+		sub.close()
 	}
 }

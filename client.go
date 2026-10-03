@@ -177,12 +177,14 @@ func (c *Client) request(ctx context.Context, method, path string, query map[str
 		return fmt.Errorf("bitget: response body exceeds %d bytes", maxResponseBodySize)
 	}
 
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return fmt.Errorf("%w: HTTP 429", ErrRateLimited)
-	}
-
 	var env envelope
 	decodeErr := json.Unmarshal(respBody, &env)
+	if resp.StatusCode == http.StatusTooManyRequests {
+		if decodeErr == nil && env.Code != "" && env.Code != "00000" {
+			return fmt.Errorf("%w: %w", ErrRateLimited, &Error{Code: env.Code, Message: env.Msg, Raw: respBody})
+		}
+		return fmt.Errorf("%w: HTTP 429", ErrRateLimited)
+	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		if decodeErr != nil || env.Code == "" || env.Code == "00000" {
 			return fmt.Errorf("bitget: unexpected HTTP status %s", resp.Status)

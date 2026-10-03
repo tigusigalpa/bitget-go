@@ -156,6 +156,11 @@ func TestDo_MapsRateLimitOn429(t *testing.T) {
 	err := c.do(context.Background(), http.MethodGet, "/api/v3/account/assets", nil, nil, nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrRateLimited))
+
+	var bitgetErr *Error
+	require.True(t, errors.As(err, &bitgetErr))
+	assert.Equal(t, "429", bitgetErr.Code)
+	assert.Equal(t, "too many requests", bitgetErr.Message)
 }
 
 func TestDo_ReturnsErrorForUnexpectedHTTPStatus(t *testing.T) {
