@@ -88,7 +88,7 @@ func TestPrivateWSConnect_ReturnsLoginErrorImmediately(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		require.NoError(t, err)
-		defer conn.Close()
+		defer func() { assert.NoError(t, conn.Close()) }()
 		_, _, err = conn.ReadMessage()
 		require.NoError(t, err)
 		require.NoError(t, conn.WriteJSON(models.WSEvent{Event: "error", Code: "30005", Msg: "login failed"}))
@@ -96,7 +96,7 @@ func TestPrivateWSConnect_ReturnsLoginErrorImmediately(t *testing.T) {
 	defer server.Close()
 
 	client := NewPrivateWSClient("key", "secret", "pass", WithWSURL("ws"+strings.TrimPrefix(server.URL, "http")))
-	defer client.Close()
+	defer func() { assert.NoError(t, client.Close()) }()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
@@ -112,7 +112,7 @@ func TestWSClient_SerializesConcurrentSubscriptions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		require.NoError(t, err)
-		defer conn.Close()
+		defer func() { assert.NoError(t, conn.Close()) }()
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				return
@@ -123,7 +123,7 @@ func TestWSClient_SerializesConcurrentSubscriptions(t *testing.T) {
 
 	client := NewPublicWSClient(WithWSURL("ws" + strings.TrimPrefix(server.URL, "http")))
 	require.NoError(t, client.Connect(context.Background()))
-	defer client.Close()
+	defer func() { assert.NoError(t, client.Close()) }()
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 32)
@@ -256,7 +256,7 @@ func TestPrivateWSClientConnectsAndReceivesPushes(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		require.NoError(t, err)
-		defer conn.Close()
+		defer func() { assert.NoError(t, conn.Close()) }()
 
 		var login models.WSLoginRequest
 		require.NoError(t, conn.ReadJSON(&login))
@@ -279,7 +279,7 @@ func TestPrivateWSClientConnectsAndReceivesPushes(t *testing.T) {
 	defer server.Close()
 
 	client := NewPrivateWSClient("key", "secret", "pass", WithWSURL("ws"+strings.TrimPrefix(server.URL, "http")), WithWSAutoReconnect(false))
-	defer client.Close()
+	defer func() { assert.NoError(t, client.Close()) }()
 	require.NoError(t, client.Connect(context.Background()))
 	assert.ErrorContains(t, client.Connect(context.Background()), "already connected")
 
@@ -300,7 +300,7 @@ func TestWSClientObservesRawFramesAndSubscriptionACK(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		require.NoError(t, err)
-		defer conn.Close()
+		defer func() { assert.NoError(t, conn.Close()) }()
 
 		var request models.WSSubscribeRequest
 		require.NoError(t, conn.ReadJSON(&request))
@@ -321,7 +321,7 @@ func TestWSClientObservesRawFramesAndSubscriptionACK(t *testing.T) {
 		}),
 		WithWSEventHandler(func(event WSLifecycleEvent) { events <- event }),
 	)
-	defer client.Close()
+	defer func() { assert.NoError(t, client.Close()) }()
 	require.NoError(t, client.Connect(context.Background()))
 
 	arg := models.WSArg{InstType: "SPOT", Topic: "ticker", Symbol: "BTCUSDT"}
@@ -363,7 +363,7 @@ func TestWSClientReportsRawObserverFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		require.NoError(t, err)
-		defer conn.Close()
+		defer func() { assert.NoError(t, conn.Close()) }()
 		require.NoError(t, conn.WriteMessage(websocket.TextMessage, []byte(`{"event":"subscribe"}`)))
 		_, _, _ = conn.ReadMessage()
 	}))
@@ -376,7 +376,7 @@ func TestWSClientReportsRawObserverFailure(t *testing.T) {
 		WithRawFrameHandler(func(RawFrame) error { return errors.New("stop consumer") }),
 		WithWSEventHandler(func(event WSLifecycleEvent) { events <- event }),
 	)
-	defer client.Close()
+	defer func() { assert.NoError(t, client.Close()) }()
 	require.NoError(t, client.Connect(context.Background()))
 
 	for {

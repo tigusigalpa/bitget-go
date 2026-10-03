@@ -41,7 +41,11 @@ func main() {
 	if err := ws.Connect(ctx); err != nil {
 		log.Fatalf("connect: %v", err)
 	}
-	defer ws.Close()
+	defer func() {
+		if err := ws.Close(); err != nil {
+			log.Printf("close WebSocket: %v", err)
+		}
+	}()
 
 	pushes, err := ws.Subscribe(ctx, models.WSArg{
 		InstType: "UTA",

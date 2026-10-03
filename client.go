@@ -167,11 +167,16 @@ func (c *Client) request(ctx context.Context, method, path string, query map[str
 	if err != nil {
 		return fmt.Errorf("bitget: do request: %w", err)
 	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize+1))
-	if err != nil {
-		return fmt.Errorf("bitget: read response body: %w", err)
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize+1))
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		if closeErr != nil {
+			return fmt.Errorf("bitget: read response body: %w; close response body: %w", readErr, closeErr)
+		}
+		return fmt.Errorf("bitget: read response body: %w", readErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("bitget: close response body: %w", closeErr)
 	}
 	if len(respBody) > maxResponseBodySize {
 		return fmt.Errorf("bitget: response body exceeds %d bytes", maxResponseBodySize)

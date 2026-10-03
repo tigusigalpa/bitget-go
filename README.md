@@ -1,22 +1,50 @@
-# Bitget Go SDK
+# Bitget Golang Client/SDK/Library
 
-[![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue)](go.mod)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Go Reference](https://pkg.go.dev/badge/github.com/tigusigalpa/bitget-go.svg)](https://pkg.go.dev/github.com/tigusigalpa/bitget-go)
+![Bitget Golang SDK](https://i.postimg.cc/j2ZkYg04/bitget-golang-github.jpg)
+
+[![CI](https://github.com/tigusigalpa/bitget-go/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tigusigalpa/bitget-go/actions/workflows/ci.yml)
 [![Tests](https://github.com/tigusigalpa/bitget-go/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/tigusigalpa/bitget-go/actions/workflows/test.yml)
+[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat-square&logo=go)](https://golang.org/)
+[![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
+[![CodeQL](https://github.com/tigusigalpa/bitget-go/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/tigusigalpa/bitget-go/actions/workflows/codeql.yml)
 [![Codecov](https://codecov.io/gh/tigusigalpa/bitget-go/graph/badge.svg)](https://codecov.io/gh/tigusigalpa/bitget-go)
+[![GitHub Release](https://img.shields.io/github/v/release/tigusigalpa/bitget-go?style=flat-square)](https://github.com/tigusigalpa/bitget-go/releases)
+[![GoDoc](https://img.shields.io/badge/godoc-reference-blue?style=flat-square&logo=go)](https://pkg.go.dev/github.com/tigusigalpa/bitget-go)
 
 An intentionally small, typed Go client for the [Bitget Unified Trading Account (UTA) API v3](https://www.bitget.com/docs/uta/quick-start). It takes care of request signing, response envelopes, WebSocket lifecycle, and numeric precision, while leaving trading decisions entirely in your application.
 
 It is not an official Bitget SDK and it does not execute a request during import or client creation.
 
+## What this library is for
+
+Think of the SDK as a small transport layer between your Go application and
+Bitget. It signs private REST requests, turns documented responses into Go
+types, and keeps a WebSocket connection alive. It deliberately does **not**
+make trading decisions, convert prices to `float64`, or hide reconnects and
+subscription errors from your application.
+
+That gives you a simple rule of thumb:
+
+- Use **REST** when you need a snapshot: balances, an order book, a recent
+  page of orders, candles, or funding history.
+- Use the regular **WebSocket subscription channel** when a bounded in-process
+  feed is enough.
+- Use the **raw-frame and lifecycle handlers** when every received payload,
+  its receipt time, and the current connection generation matter to your
+  downstream system.
+
 ## Start here
 
-Use a public REST example first. It needs no credentials and never touches an account:
+Start with a public REST call. It needs no credentials and cannot touch an
+account. In a new directory, create a tiny Go module and run the program:
 
 ```bash
+mkdir bitget-first-request
+cd bitget-first-request
+go mod init example.com/bitget-first-request
 go get github.com/tigusigalpa/bitget-go
-go run ./examples/rest
+# Save the program below as main.go, then:
+go run .
 ```
 
 The module requires Go 1.21 or newer. Prices, quantities, balances, fees, and timestamps are represented as strings where the API returns strings. That avoids accidental `float64` rounding in financial code.
@@ -45,6 +73,10 @@ func main() {
 }
 ```
 
+If you prefer to explore the repository examples, clone the project and run
+`go run ./examples/rest`. The public REST and public WebSocket examples are
+safe to run without environment variables.
+
 ## Choose the smallest client for the job
 
 | Need | Create | Credentials | What it does |
@@ -55,6 +87,61 @@ func main() {
 | Private fills and account feed | `NewPrivateWSClient(key, secret, passphrase)` | Yes | Logs in to a private WebSocket and subscribes to its channels |
 
 There is no automatic switch between public and private APIs, production and demo endpoints, or REST and WebSocket. You choose the transport and credentials explicitly.
+
+### A practical public market query
+
+The market methods return strings for exchange-provided decimals and timestamps.
+Keep those values as strings until your own domain layer deliberately converts
+them with the precision rules your application needs. This complete helper
+needs the `market` package in addition to the imports from the first example.
+
+```go
+import (
+	"context"
+	"fmt"
+	"time"
+
+	bitget "github.com/tigusigalpa/bitget-go"
+	"github.com/tigusigalpa/bitget-go/models"
+	"github.com/tigusigalpa/bitget-go/rest/market"
+)
+
+func printRecentMarket() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := bitget.NewRestClient("", "", "")
+	candles, err := client.Market.GetCandles(ctx, market.GetCandlesOptions{
+		Category: models.CategorySpot,
+		Symbol:   "BTCUSDT",
+		Interval: "1m",
+		Limit:    "10",
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, candle := range candles {
+		// candle = [timestamp, open, high, low, close, base volume, turnover]
+		fmt.Printf("close=%s at %s\n", candle[4], candle[0])
+	}
+
+	fills, err := client.Market.GetPublicFills(ctx, models.CategorySpot, "BTCUSDT", "20")
+	if err != nil {
+		return err
+	}
+	for _, fill := range fills {
+		fmt.Printf("%s %s @ %s (exec %s)\n", fill.Side, fill.Size, fill.Price, fill.ExecID)
+	}
+
+	return nil
+}
+```
+
+`GetPublicFills` is a recent-data repair source, not a complete historical
+trade ledger. For futures funding data, call `GetFundingRateHistory` with the
+same category and symbol; use the corresponding instrument's `FundInterval`
+instead of assuming a fixed settlement schedule.
 
 ## Demo credentials before production
 
@@ -222,6 +309,101 @@ or hand off to your own durable queue. Mark a subscription ready only after a
 `WSSubscribed` event for the current connection generation; an error with an
 `arg` closes and removes that rejected subscription.
 
+### Wait for a subscription ACK
+
+`Subscribe` confirms that the SDK wrote the request; it does not mean Bitget
+has accepted it. For a single, non-reconnecting consumer, wait for
+`WSSubscribed` before treating the feed as ready. The example also surfaces a
+provider rejection instead of silently continuing with an empty channel.
+
+```go
+// Imports: context, fmt, sync, plus bitget and models.
+// The caller must close the returned client when it no longer needs the feed.
+func subscribeWhenReady(ctx context.Context) (*bitget.WSClient, <-chan models.WSPush, error) {
+	ready := make(chan struct{})
+	providerError := make(chan error, 1)
+	var readyOnce sync.Once
+
+	ws := bitget.NewPublicWSClient(
+		bitget.WithWSAutoReconnect(false),
+		bitget.WithWSEventHandler(func(event bitget.WSLifecycleEvent) {
+			switch event.Type {
+			case bitget.WSSubscribed:
+				if event.Arg != nil && event.Arg.Topic == "ticker" && event.Arg.Symbol == "BTCUSDT" {
+					readyOnce.Do(func() { close(ready) })
+				}
+			case bitget.WSProviderError:
+				select {
+				case providerError <- fmt.Errorf("Bitget rejected subscription %#v: %s %s", event.Arg, event.Code, event.Message):
+				default: // Keep the synchronous lifecycle callback non-blocking.
+				}
+			}
+		}),
+	)
+
+	if err := ws.Connect(ctx); err != nil {
+		return nil, nil, err
+	}
+
+	pushes, err := ws.Subscribe(ctx, models.WSArg{InstType: "SPOT", Topic: "ticker", Symbol: "BTCUSDT"})
+	if err != nil {
+		_ = ws.Close()
+		return nil, nil, err
+	}
+
+	select {
+	case <-ready:
+		// The provider accepted this subscription.
+		return ws, pushes, nil
+	case err := <-providerError:
+		_ = ws.Close()
+		return nil, nil, err
+	case <-ctx.Done():
+		_ = ws.Close()
+		return nil, nil, ctx.Err()
+	}
+}
+```
+
+For reconnecting consumers, track the latest `WSConnected` generation and
+accept a `WSSubscribed` event only from that generation. A reconnect requires
+a fresh ACK; do not treat a prior connection's acknowledgment as current.
+
+### Preserve exact received messages
+
+The regular `WSPush` route is intentionally convenient and bounded. If you
+need audit-grade provenance or must hand messages to a durable queue without a
+decode/re-encode cycle, use the raw handler. It receives a private byte copy
+before the SDK parses JSON.
+
+```go
+// Imports: errors, log, plus bitget.
+func newRawClient(rawFrames chan<- bitget.RawFrame) *bitget.WSClient {
+	return bitget.NewPublicWSClient(
+		bitget.WithRawFrameHandler(func(frame bitget.RawFrame) error {
+			// The caller must drain this channel or replace it with a durable queue.
+			select {
+			case rawFrames <- frame:
+				return nil
+			default:
+				return errors.New("raw-frame consumer is overloaded")
+			}
+		}),
+		bitget.WithWSEventHandler(func(event bitget.WSLifecycleEvent) {
+			if event.Type == bitget.WSTerminal {
+				log.Printf("raw frame consumer stopped: %v", event.Err)
+			}
+		}),
+	)
+}
+```
+
+Returning an error from the raw handler deliberately produces a terminal
+lifecycle event and disconnects the current connection. That makes overload or
+storage failure visible to the caller rather than silently losing canonical
+data. Do not mutate `frame.Payload` and do not synchronously perform slow I/O
+unless deliberate backpressure is what you want.
+
 The public `examples/websocket` program is credential-free. The private `examples/websocket-private` program uses Bitget's Demo private endpoint explicitly and decodes the typed `fast-fill` payload.
 
 Bitget documents a maximum of 10 WebSocket messages per second, recommends fewer than 50 channel subscriptions per connection, and publishes connection/subscription caps. Design a connection pool and resubscription cadence around those limits rather than opening a connection per symbol. [WebSocket connection guidance](https://www.bitget.com/docs/uta/quick-start#websocket)
@@ -253,6 +435,21 @@ go test -tags=integration ./...
 The public integration test contacts Bitget. The private integration test is skipped unless all three `BITGET_*` variables are present, and uses demo mode.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. For exact endpoint coverage, see [docs/endpoints.md](docs/endpoints.md). For a security report, see [SECURITY.md](SECURITY.md).
+
+### Before opening a pull request
+
+Run the same checks used for the library's core behaviour:
+
+```bash
+go test ./...
+go test -race ./...
+golint ./...
+go vet ./...
+```
+
+Add a focused test whenever an endpoint, a signed request, or a WebSocket
+lifecycle branch changes. Tests use local HTTP/WebSocket servers by default;
+the optional integration suite is the only test path that contacts Bitget.
 
 ## License and attribution
 
