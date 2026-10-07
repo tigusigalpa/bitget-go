@@ -28,7 +28,7 @@ func NewRestClient(apiKey, secretKey, passphrase string, opts ...Option) *RestCl
 	client := NewClient(apiKey, secretKey, passphrase, opts...)
 	return &RestClient{
 		Client:  client,
-		Market:  market.NewClient(client.doPublic),
+		Market:  market.NewClientWithReceipts(client.doPublic, client.doPublicWithReceipt),
 		Account: account.NewClient(client.do),
 		Trade:   trade.NewClient(client.do),
 	}

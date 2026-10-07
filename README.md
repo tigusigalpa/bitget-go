@@ -208,11 +208,106 @@ This is a focused Phase 1 surface. Methods not listed here are not implemented y
 
 | Service | Methods |
 |---|---|
-| `Market` (public) | `GetInstruments`, `GetTickers`, `GetOrderBook`, `GetCandles`, `GetPublicFills`, `GetFundingRateHistory` |
+| `Market` (public) | `GetInstruments`, `GetTickers`, `GetOrderBook`, `GetCandles`, `GetHistoryCandles`, `GetPublicFills`, `GetFundingRateHistory`, `GetLiquidations` |
 | `Account` (private) | `GetAssets`, `GetSettings`, `SetLeverage` |
 | `Trade` (private) | `PlaceOrder`, `ModifyOrder`, `CancelOrder`, `GetOpenOrders`, `GetOrderHistory`, `GetPositions` |
 
 See [docs/endpoints.md](docs/endpoints.md) for the exact HTTP paths and Bitget documentation for each method. Model fields are deliberately forward-compatible strings where a future API value should not be rejected by a closed enum.
+
+### Deep candle history with response evidence (v1.2.0)
+
+For candles older than the recent-data window, use `GetHistoryCandles`.
+It calls the official `/api/v3/market/history-candles` route, with a request page
+limit of 100. `GetCandles` still calls `/api/v3/market/candles` with its existing
+maximum of 1,000. `GetFundingRateHistory` and custom `WithHTTPClient` transports
+also keep their existing behaviour.
+
+Use `GetHistoryCandlesWithReceipt` if you need both typed candles and evidence
+of the exact response, without wrapping/intercepting an HTTP transport:
+
+```go
+// Imports: context, fmt, time, plus bitget, models and rest/market.
+func readHistoricalCandles() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client := bitget.NewRestClient("", "", "")
+	candles, receipt, err := client.Market.GetHistoryCandlesWithReceipt(ctx, market.GetHistoryCandlesOptions{
+		Category:   models.CategorySpot,
+		Symbol:     "BTCUSDT",
+		Interval:   "1m",
+		CandleType: "market",
+		StartTime:  "1609459200000",
+		EndTime:    "1609465200000",
+		Limit:      "100",
+	})
+	if receipt != nil {
+		fmt.Printf("HTTP %d, received %s, complete body: %t, bytes: %d\n",
+			receipt.StatusCode(), receipt.ReceivedAt(), receipt.Complete(), len(receipt.Payload()))
+		// Persist receipt.Payload() and receipt.Request() in your own evidence store.
+	}
+	if err != nil {
+		return err // Never treat an error response as admitted candle data.
+	}
+	for _, candle := range candles {
+		fmt.Printf("timestamp=%s close=%s volume=%s\n", candle[0], candle[4], candle[5])
+	}
+	return nil
+}
+```
+
+The time selectors are Unix millisecond strings and are sent unchanged. Bitget
+describes them as after/before bounds, but does not explicitly guarantee whether
+equality is included. It also documents that `endTime` even 1 ms past an interval
+boundary may add an earlier candle. The SDK preserves every returned row and its
+order; it does not trim, round, deduplicate, or silently substitute recent data.
+Each query window may span at most 90 days even though its data may be older.
+See [Bitget's history contract](https://www.bitget.com/docs/catalog/market/market-data#get-klinecandlestick-history).
+
+Pagination is explicit: choose the next time window from the returned timestamps,
+handle overlapping boundary candles in your application, and stop when a page is
+empty or makes no progress. The endpoint has no response cursor and the SDK does
+not infer complete historical coverage from a full or empty page.
+
+`models.RESTReceipt` stores at most `bitget.MaxRESTReceiptBytes` (10 MiB). Its
+payload and request metadata accessors return copies. `ReceivedAt` is local time
+after the bounded body read and before JSON decoding, separate from candle/event
+time. Metadata contains method, path and allowlisted market selectors; it excludes
+credentials, headers, host and URL userinfo. Bytes are the body exposed by
+`net/http`, including its automatic decompression, not HTTP/TLS framing.
+
+A receipt can accompany API errors, invalid JSON, interrupted reads and oversize
+responses. Oversize/interrupted bodies have `Complete() == false`; oversize keeps
+only the first 10 MiB and fails the call. A fully received error or malformed JSON
+body can have `Complete() == true`: this flag describes byte capture, never market
+coverage or successful decoding. Validation/cancellation before an HTTP response
+returns a nil receipt. `market.NewClient` remains supported for custom injection,
+but cannot provide receipts without `NewClientWithReceipts`; `NewRestClient`
+wires both transports automatically.
+
+### Liquidations are explicitly partial
+
+`GetLiquidations` and `GetLiquidationsWithReceipt` call the official public
+`/api/v3/market/liquidations` route and return `models.PartialLiquidations`.
+Pass `market.GetLiquidationsOptions{Category: models.CategoryUSDTFutures,
+Symbol: "BTCUSDT", Limit: "100"}` for a page, then pass the returned `Cursor`
+unchanged in the next request. Cursors are opaque; stop on empty/non-progressing
+pages rather than assuming that pagination proves completeness.
+
+The [official REST contract](https://www.bitget.com/docs/catalog/market/derivatives#get-liquidations-history)
+only covers the last three days and allows delayed data. It provides no stable
+event ID in its documented response, and does not specify amount units or REST
+aggregation/exhaustiveness. `Price`, `Amount` and `Ts` remain exact provider
+strings. The SDK creates no execution identity, converts no units, and does not
+deduplicate indistinguishable observations. Do not label these data complete
+historical liquidations. WebSocket liquidation aggregation rules must not be
+assumed to apply to REST.
+
+`GetPublicFills` remains recent public trades, preserving `ExecID`, `ExecLinkID`,
+`Ts` and category-dependent size units. The audited UTA market catalog has no
+documented public deep fills route. The official `/api/v3/trade/fills` is private
+account history, not the public market tape; no historical public fills method
+is fabricated here. Audit sources and classified test fixtures are recorded in
+[testdata/market-history/README.md](testdata/market-history/README.md).
 
 ### Pages, cursors, and cancellation
 
@@ -413,6 +508,7 @@ Bitget documents a maximum of 10 WebSocket messages per second, recommends fewer
 | Program | What it demonstrates | Credentials |
 |---|---|---|
 | [`examples/rest`](examples/rest/main.go) | Public ticker and safe order-book access | None |
+| [`examples/history`](examples/history/main.go) | One deep candle page with raw receipt metadata | None |
 | [`examples/demo-account`](examples/demo-account/main.go) | Demo-only signed account read | Demo key + `BITGET_DEMO=1` |
 | [`examples/websocket`](examples/websocket/main.go) | Public ticker subscription, signal cancellation | None |
 | [`examples/websocket-private`](examples/websocket-private/main.go) | Demo private `fast-fill` subscription and payload decoding | Demo key + `BITGET_DEMO=1` |

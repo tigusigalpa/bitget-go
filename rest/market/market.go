@@ -16,7 +16,8 @@ type doPublicFunc func(ctx context.Context, method, path string, query map[strin
 
 // Client provides Bitget's public market-data endpoints.
 type Client struct {
-	doPublic doPublicFunc
+	doPublic            doPublicFunc
+	doPublicWithReceipt doPublicReceiptFunc
 }
 
 // NewClient wires a market.Client to the root package's unauthenticated
@@ -24,6 +25,14 @@ type Client struct {
 func NewClient(doPublic doPublicFunc) *Client {
 	return &Client{doPublic: doPublic}
 }
+
+// NewClientWithReceipts wires the optional receipt transport without changing
+// NewClient's function signature. NewRestClient supplies both transports.
+func NewClientWithReceipts(doPublic doPublicFunc, withReceipt doPublicReceiptFunc) *Client {
+	return &Client{doPublic: doPublic, doPublicWithReceipt: withReceipt}
+}
+
+type doPublicReceiptFunc func(context.Context, string, string, map[string]string, interface{}) (*models.RESTReceipt, error)
 
 // GetInstruments returns trading-pair specifications for a product
 // category, optionally filtered to a single symbol.

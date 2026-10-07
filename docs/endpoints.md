@@ -11,8 +11,23 @@ Anything not listed here is **not implemented** in this Phase 1 release.
 | `Market.GetTickers` | GET | `/api/v3/market/tickers` | https://www.bitget.com/api-doc/uta/public/Tickers |
 | `Market.GetOrderBook` | GET | `/api/v3/market/orderbook` | https://www.bitget.com/api-doc/uta/public/OrderBook |
 | `Market.GetCandles` | GET | `/api/v3/market/candles` | https://www.bitget.com/docs/catalog/market/market-data |
+| `Market.GetHistoryCandles`, `GetHistoryCandlesWithReceipt` | GET | `/api/v3/market/history-candles` | https://www.bitget.com/docs/catalog/market/market-data#get-klinecandlestick-history |
 | `Market.GetPublicFills` | GET | `/api/v3/market/fills` | https://www.bitget.com/docs/catalog/market/market-data |
 | `Market.GetFundingRateHistory` | GET | `/api/v3/market/history-fund-rate` | https://www.bitget.com/legacy-docs/uta/public/Get-History-Funding-Rate |
+| `Market.GetLiquidations`, `GetLiquidationsWithReceipt` | GET | `/api/v3/market/liquidations` | https://www.bitget.com/docs/catalog/market/derivatives#get-liquidations-history |
+
+History candles are separate from recent candles: request maximum 100, unchanged
+time/type selectors, no client-side boundary rounding/trimming. The documented
+extra early candle is retained. Equality semantics are not explicitly guaranteed.
+Each query window is at most 90 days, even for older data. `WithReceipt` methods
+return bounded immutable evidence alongside errors when a response was received.
+
+Liquidations are `PartialLiquidations`: three-day lookback, potential delay,
+opaque cursor, no documented stable event ID, amount units or REST aggregation
+guarantee. They do not establish complete historical coverage. Public UTA fills
+are recent only; `/api/v3/trade/fills` is private account fill history and is not
+implemented as a public market method. See the source audit and fixture
+classifications in [market-history fixtures](../testdata/market-history/README.md).
 
 ## Account (Private)
 

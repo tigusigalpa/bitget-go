@@ -128,3 +128,22 @@ type FundingRate struct {
 type FundingRateHistory struct {
 	ResultList []FundingRate `json:"resultList"`
 }
+
+// Liquidation is a partial provider observation, not an identifiable execution.
+// Amount is exact provider text; the current REST contract does not specify its
+// units. Ts is the provider's millisecond timestamp. No synthetic ID is created.
+type Liquidation struct {
+	Symbol string `json:"symbol"`
+	Side   string `json:"side"`
+	Price  string `json:"price"`
+	Amount string `json:"amount"`
+	Ts     string `json:"ts"`
+}
+
+// PartialLiquidations is one page of delayed observations from the last three
+// days. Cursor is opaque pagination state, not stable event identity. The API
+// does not establish exhaustive coverage, amount units or REST aggregation rules.
+type PartialLiquidations struct {
+	List   []Liquidation `json:"list"`
+	Cursor string        `json:"cursor"`
+}

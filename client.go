@@ -19,9 +19,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tigusigalpa/bitget-go/models"
 )
 
 const maxResponseBodySize = 10 << 20
+
+// MaxRESTReceiptBytes is the maximum number of response-body bytes retained in
+// a RESTReceipt. An oversized response fails with an incomplete bounded receipt.
+const MaxRESTReceiptBytes = maxResponseBodySize
 
 // Client is the low-level authenticated HTTP transport shared by every
 // service under RestClient. Most callers should construct a *RestClient via
@@ -122,6 +128,15 @@ func (c *Client) do(ctx context.Context, method, path string, query map[string]s
 }
 
 func (c *Client) request(ctx context.Context, method, path string, query map[string]string, body interface{}, result interface{}, signed bool) error {
+	_, err := c.requestWithReceipt(ctx, method, path, query, body, result, signed, false)
+	return err
+}
+
+func (c *Client) doPublicWithReceipt(ctx context.Context, method, path string, query map[string]string, result interface{}) (*models.RESTReceipt, error) {
+	return c.requestWithReceipt(ctx, method, path, query, nil, result, false, true)
+}
+
+func (c *Client) requestWithReceipt(ctx context.Context, method, path string, query map[string]string, body interface{}, result interface{}, signed, capture bool) (*models.RESTReceipt, error) {
 	queryString := buildQueryString(query)
 	requestPath := path
 	fullURL := c.baseURL + path
@@ -134,13 +149,13 @@ func (c *Client) request(ctx context.Context, method, path string, query map[str
 	if body != nil {
 		bodyBytes, err = json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("bitget: marshal request body: %w", err)
+			return nil, fmt.Errorf("bitget: marshal request body: %w", err)
 		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, strings.ToUpper(method), fullURL, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return fmt.Errorf("bitget: build request: %w", err)
+		return nil, fmt.Errorf("bitget: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("locale", c.locale)
@@ -165,53 +180,81 @@ func (c *Client) request(ctx context.Context, method, path string, query map[str
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("bitget: do request: %w", err)
+		return nil, fmt.Errorf("bitget: do request: %w", err)
 	}
 	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize+1))
+	receivedAt := time.Now()
+	var receipt *models.RESTReceipt
+	if capture {
+		payload := respBody
+		if len(payload) > MaxRESTReceiptBytes {
+			payload = payload[:MaxRESTReceiptBytes]
+		}
+		receipt = models.NewRESTReceipt(safeRESTRequestMetadata(req, query), payload, resp.StatusCode, receivedAt,
+			readErr == nil && len(respBody) <= maxResponseBodySize)
+	}
 	closeErr := resp.Body.Close()
 	if readErr != nil {
 		if closeErr != nil {
-			return fmt.Errorf("bitget: read response body: %w; close response body: %w", readErr, closeErr)
+			return receipt, fmt.Errorf("bitget: read response body: %w; close response body: %w", readErr, closeErr)
 		}
-		return fmt.Errorf("bitget: read response body: %w", readErr)
+		return receipt, fmt.Errorf("bitget: read response body: %w", readErr)
 	}
 	if closeErr != nil {
-		return fmt.Errorf("bitget: close response body: %w", closeErr)
+		return receipt, fmt.Errorf("bitget: close response body: %w", closeErr)
 	}
 	if len(respBody) > maxResponseBodySize {
-		return fmt.Errorf("bitget: response body exceeds %d bytes", maxResponseBodySize)
+		return receipt, fmt.Errorf("bitget: response body exceeds %d bytes", maxResponseBodySize)
 	}
 
 	var env envelope
 	decodeErr := json.Unmarshal(respBody, &env)
 	if resp.StatusCode == http.StatusTooManyRequests {
 		if decodeErr == nil && env.Code != "" && env.Code != "00000" {
-			return fmt.Errorf("%w: %w", ErrRateLimited, &Error{Code: env.Code, Message: env.Msg, Raw: respBody})
+			return receipt, fmt.Errorf("%w: %w", ErrRateLimited, &Error{Code: env.Code, Message: env.Msg, Raw: respBody})
 		}
-		return fmt.Errorf("%w: HTTP 429", ErrRateLimited)
+		return receipt, fmt.Errorf("%w: HTTP 429", ErrRateLimited)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		if decodeErr != nil || env.Code == "" || env.Code == "00000" {
-			return fmt.Errorf("bitget: unexpected HTTP status %s", resp.Status)
+			return receipt, fmt.Errorf("bitget: unexpected HTTP status %s", resp.Status)
 		}
 	}
 	if decodeErr != nil {
-		return fmt.Errorf("bitget: decode response envelope (status %d): %w", resp.StatusCode, decodeErr)
+		return receipt, fmt.Errorf("bitget: decode response envelope (status %d): %w", resp.StatusCode, decodeErr)
+	}
+	if capture && env.Code == "" {
+		return receipt, fmt.Errorf("bitget: response envelope is missing code")
 	}
 
 	if env.Code != "" && env.Code != "00000" {
 		bitgetErr := &Error{Code: env.Code, Message: env.Msg, Raw: respBody}
 		if sentinel := MapErrorCode(env.Code); sentinel != nil {
-			return fmt.Errorf("%w: %w", sentinel, bitgetErr)
+			return receipt, fmt.Errorf("%w: %w", sentinel, bitgetErr)
 		}
-		return bitgetErr
+		return receipt, bitgetErr
 	}
 
 	if result != nil && len(env.Data) > 0 {
-		if err := json.Unmarshal(env.Data, result); err != nil {
-			return fmt.Errorf("bitget: decode response data: %w", err)
+		if capture && bytes.Equal(bytes.TrimSpace(env.Data), []byte("null")) {
+			return receipt, fmt.Errorf("bitget: response data is null")
 		}
+		if err := json.Unmarshal(env.Data, result); err != nil {
+			return receipt, fmt.Errorf("bitget: decode response data: %w", err)
+		}
+	} else if capture && result != nil {
+		return receipt, fmt.Errorf("bitget: response envelope is missing data")
 	}
 
-	return nil
+	return receipt, nil
+}
+
+func safeRESTRequestMetadata(req *http.Request, query map[string]string) models.RESTRequestMetadata {
+	safeQuery := make(map[string]string)
+	for _, key := range []string{"category", "symbol", "interval", "type", "startTime", "endTime", "limit", "cursor"} {
+		if value := query[key]; value != "" {
+			safeQuery[key] = value
+		}
+	}
+	return models.RESTRequestMetadata{Method: req.Method, Path: req.URL.EscapedPath(), Query: safeQuery}
 }
